@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+pydantic-settings
+python-dotenv
+aiohttp
+requests
+jinja2
+python-multipart
+apscheduler
+aiogram
+vk-api
+aiohttp-socks
