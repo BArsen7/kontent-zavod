@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Dict, Any
 import datetime
+import threading
 
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,8 @@ from database import get_db, init_db
 from models import Post
 from services.content_service import generate_weekly_pack
 from publishers.vk_publisher import VKPublisher
+from bots.vk_bot import run_vk_bot
+from services.scheduler import start_scheduler
 
 # Настройка логирования
 logging.basicConfig(
@@ -23,13 +26,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация БД при старте
+# Инициализация БД при старте, запуск бота и планировщика
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Инициализация базы данных...")
     init_db()
     logger.info("База данных готова")
+    
+    # Запускаем VK бота в отдельном потоке
+    logger.info("Запуск VK бота...")
+    bot_thread = threading.Thread(target=run_vk_bot, name="VKBotStartup", daemon=True)
+    bot_thread.start()
+    
+    # Запускаем планировщик публикаций в отдельном потоке
+    logger.info("Запуск планировщика публикаций...")
+    scheduler_thread = threading.Thread(target=start_scheduler, name="SchedulerStartup", daemon=True)
+    scheduler_thread.start()
+    
     yield
+    
     logger.info("Завершение работы приложения")
 
 app = FastAPI(
