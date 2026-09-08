@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Autopilot Content - Панель управления</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .loader {
+            border-top-color: #3498db;
+            -webkit-animation: spinner 1.5s linear infinite;
+            animation: spinner 1.5s linear infinite;
+        }
+        @keyframes spinner {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <header class="mb-8 flex justify-between items-center">
+            <h1 class="text-3xl font-bold text-gray-800">🍪 Autopilot Content</h1>
+            <button 
+                onclick="generateWeekly()" 
+                id="genBtn"
+                class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-lg shadow transition duration-200 flex items-center">
+                <span id="genBtnText">✨ Сгенерировать пак на неделю</span>
+                <div id="genLoader" class="loader ease-linear rounded-full border-2 border-t-2 border-gray-200 h-5 w-5 ml-2 hidden"></div>
+            </button>
+        </header>
+
+        <!-- Stats Summary -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <div class="bg-white p-4 rounded-lg shadow">
+                <div class="text-gray-500 text-sm">Всего постов</div>
+                <div class="text-2xl font-bold" id="stat-total">0</div>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <div class="text-gray-500 text-sm">Черновики</div>
+                <div class="text-2xl font-bold text-yellow-600" id="stat-draft">0</div>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <div class="text-gray-500 text-sm">Одобрено</div>
+                <div class="text-2xl font-bold text-blue-600" id="stat-approved">0</div>
+            </div>
+            <div class="bg-white p-4 rounded-lg shadow">
+                <div class="text-gray-500 text-sm">Опубликовано</div>
+                <div class="text-2xl font-bold text-green-600" id="stat-published">0</div>
+            </div>
+        </div>
+
+        <!-- Posts Table -->
+        <div class="bg-white rounded-lg shadow overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-200">
+                <h2 class="text-xl font-semibold text-gray-800">Посты</h2>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-gray-50">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Тип</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Тема</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Текст (превью)</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Изображение</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Статус</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
+                        </tr>
+                    </thead>
+                    <tbody class="bg-white divide-y divide-gray-200" id="postsTableBody">
+                        <tr>
+                            <td colspan="7" class="px-6 py-4 text-center text-gray-500">Загрузка...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition duration-300">
+        <span id="toastMessage">Notification</span>
+    </div>
+
+    <script>
+        const API_BASE = '';
+
+        // Утилиты
+        function showToast(message, isError = false) {
+            const toast = document.getElementById('toast');
+            const toastMsg = document.getElementById('toastMessage');
+            toastMsg.textContent = message;
+            toast.classList.remove(isError ? 'bg-gray-800' : 'bg-green-600');
+            toast.classList.add(isError ? 'bg-red-600' : 'bg-green-600');
+            toast.classList.remove('translate-y-20', 'opacity-0');
+            setTimeout(() => {
+                toast.classList.add('translate-y-20', 'opacity-0');
+            }, 3000);
+        }
+
+        function getStatusBadge(status) {
+            const badges = {
+                'draft': '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">Черновик</span>',
+                'approved': '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">Одобрено</span>',
+                'published': '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">Опубликовано</span>',
+                'error': '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800">Ошибка</span>'
+            };
+            return badges[status] || status;
+        }
+
+        function getTypeBadge(type) {
+            const badges = {
+                'benefit': 'Польза',
+                'engagement': 'Вовлечение',
+                'entertainment': 'Развлечение',
+                'sales': 'Продажа'
+            };
+            const colors = {
+                'benefit': 'bg-indigo-100 text-indigo-800',
+                'engagement': 'bg-pink-100 text-pink-800',
+                'entertainment': 'bg-purple-100 text-purple-800',
+                'sales': 'bg-orange-100 text-orange-800'
+            };
+            return `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${colors[type] || 'bg-gray-100 text-gray-800'}">${badges[type] || type}</span>`;
+        }
+
+        // Загрузка постов
+        async function loadPosts() {
+            try {
+                const response = await fetch(`${API_BASE}/api/posts`);
+                if (!response.ok) throw new Error('Ошибка загрузки');
+                const posts = await response.json();
+                
+                renderPosts(posts);
+                updateStats(posts);
+            } catch (error) {
+                console.error('Ошибка:', error);
+                document.getElementById('postsTableBody').innerHTML = `
+                    <tr><td colspan="7" class="px-6 py-4 text-center text-red-500">Ошибка загрузки постов</td></tr>
+                `;
+            }
+        }
+
+        function renderPosts(posts) {
+            const tbody = document.getElementById('postsTableBody');
+            if (posts.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="7" class="px-6 py-4 text-center text-gray-500">Постов пока нет. Нажмите "Сгенерировать пак"</td></tr>`;
+                return;
+            }
+
+            tbody.innerHTML = posts.map(post => `
+                <tr class="hover:bg-gray-50">
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">#${post.id}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">${getTypeBadge(post.post_type)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 max-w-xs truncate">${post.topic || '-'}</td>
+                    <td class="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">${(post.text_final || post.text_draft || '').substring(0, 60)}...</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm">
+                        ${post.image_url ? 
+                            `<span class="text-green-600">✓ Есть</span>` : 
+                            `<span class="text-gray-400">Нет</span>`}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">${getStatusBadge(post.status)}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        ${post.status === 'draft' ? `
+                            <button onclick="approvePost(${post.id})" class="text-blue-600 hover:text-blue-900 mr-3">Одобрить</button>
+                        ` : ''}
+                        ${post.status === 'approved' ? `
+                            <button onclick="publishPost(${post.id})" class="text-green-600 hover:text-green-900">В ВК</button>
+                        ` : ''}
+                        ${post.status === 'published' ? `
+                            <span class="text-gray-400">Готово</span>
+                        ` : ''}
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        function updateStats(posts) {
+            document.getElementById('stat-total').textContent = posts.length;
+            document.getElementById('stat-draft').textContent = posts.filter(p => p.status === 'draft').length;
+            document.getElementById('stat-approved').textContent = posts.filter(p => p.status === 'approved').length;
+            document.getElementById('stat-published').textContent = posts.filter(p => p.status === 'published').length;
+        }
+
+        // Действия
+        async function generateWeekly() {
+            const btn = document.getElementById('genBtn');
+            const loader = document.getElementById('genLoader');
+            const btnText = document.getElementById('genBtnText');
+            
+            btn.disabled = true;
+            loader.classList.remove('hidden');
+            btnText.textContent = 'Генерация...';
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/generate/weekly`, { method: 'POST' });
+                const result = await response.json();
+                
+                if (response.ok) {
+                    showToast(`Запущена генерация ${result.count || 7} постов!`);
+                    setTimeout(loadPosts, 2000); // Обновить через 2 сек
+                } else {
+                    throw new Error(result.detail || 'Ошибка генерации');
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            } finally {
+                btn.disabled = false;
+                loader.classList.add('hidden');
+                btnText.textContent = '✨ Сгенерировать пак на неделю';
+            }
+        }
+
+        async function approvePost(postId) {
+            try {
+                const response = await fetch(`${API_BASE}/api/posts/${postId}/approve`, { method: 'POST' });
+                if (response.ok) {
+                    showToast('Пост одобрен!');
+                    loadPosts();
+                } else {
+                    throw new Error('Ошибка одобрения');
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
+        async function publishPost(postId) {
+            if (!confirm('Опубликовать этот пост ВКонтакте?')) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/publish/vk/${postId}`, { method: 'POST' });
+                const result = await response.json();
+                
+                if (response.ok && result.success) {
+                    showToast(`Опубликовано! ID: ${result.post_id}`);
+                    loadPosts();
+                } else {
+                    throw new Error(result.error || 'Ошибка публикации');
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
+        // Инициализация
+        document.addEventListener('DOMContentLoaded', loadPosts);
+    </script>
+</body>
+</html>
