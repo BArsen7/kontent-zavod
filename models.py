@@ -18,7 +18,8 @@ class PlatformAccount(Base):
     access_token: Mapped[str] = mapped_column(String(500), nullable=False)
     config_json: Mapped[Optional[str]] = mapped_column(JSON, nullable=True)
 
-    posts: Mapped[list["Post"]] = relationship("Post", back_populates="account")
+    # Убираем relationship с Post, так как в модели Post нет foreign key на platform_accounts
+    # posts: Mapped[list["Post"]] = relationship("Post", back_populates="account")
 
 
 class ContentPlan(Base):
