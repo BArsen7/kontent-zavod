@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # VKontakte settings
     vk_token: str = ""
     vk_group_id: int = 0
+    vk_client_id: str = ""
+    vk_client_secret: str = ""
+    vk_redirect_uri: str = "http://127.0.0.1:8000/auth/vk/callback"
 
     # Telegram settings
     tg_bot_token: str = ""

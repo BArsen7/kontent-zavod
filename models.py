@@ -1,10 +1,48 @@
 from datetime import datetime
 from typing import Optional
+import json
 
-from sqlalchemy import String, Integer, ForeignKey, DateTime, Text, JSON
+from sqlalchemy import String, Integer, ForeignKey, DateTime, Text, JSON, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
+
+
+class User(Base):
+    """Модель пользователя системы (администратора сообществ)."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    vk_id: Mapped[str] = mapped_column(String(50), nullable=False, unique=True, index=True)
+    vk_first_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    vk_last_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    vk_photo: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    access_token: Mapped[str] = mapped_column(String(500), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    last_login: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    communities: Mapped[list["UserCommunity"]] = relationship(
+        "UserCommunity", back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class UserCommunity(Base):
+    """Модель связи пользователя с сообществами (права доступа)."""
+
+    __tablename__ = "user_communities"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    group_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    group_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    group_token: Mapped[str] = mapped_column(String(500), nullable=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    can_post: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user: Mapped["User"] = relationship("User", back_populates="communities")
 
 
 class PlatformAccount(Base):

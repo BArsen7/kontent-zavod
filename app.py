@@ -1,19 +1,24 @@
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import datetime
 import threading
+import hashlib
+import secrets
 
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request
+import vk_api
+import requests as req_lib
+
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from config import settings
 from database import get_db, init_db
-from models import Post
+from models import Post, User, UserCommunity
 from services.content_service import generate_weekly_pack
 from publishers.vk_publisher import VKPublisher
 from managers.community_manager import CommunityManager
@@ -82,14 +87,153 @@ app.add_middleware(
 # Шаблоны
 templates = Jinja2Templates(directory="web/templates")
 
+# Хранилище сессий в памяти (для демонстрации)
+# В продакшене использовать Redis или базу данных
+_session_store: Dict[str, Dict[str, Any]] = {}
+
+
+def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optional[User]:
+    """Получает текущего пользователя из сессии."""
+    session_id = request.cookies.get("session_id")
+    if not session_id or session_id not in _session_store:
+        return None
+    
+    session_data = _session_store[session_id]
+    user_id = session_data.get("user_id")
+    
+    if not user_id:
+        return None
+    
+    return db.query(User).filter(User.id == user_id).first()
+
+
+def require_auth(request: Request, db: Session = Depends(get_db)) -> User:
+    """Требует аутентификацию пользователя."""
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Аккаунт деактивирован")
+    return user
+
 
 # --- Web Routes ---
 
 @app.get("/")
 async def index(request: Request, db: Session = Depends(get_db)):
     """Рендерит главную страницу с таблицей постов."""
-    posts = db.query(Post).order_by(Post.id.desc()).all()
-    return templates.TemplateResponse(request=request, name="index.html", context={"posts": posts})
+    user = get_current_user(request, db)
+    posts = []
+    if user:
+        posts = db.query(Post).order_by(Post.id.desc()).all()
+    return templates.TemplateResponse(
+        request=request, 
+        name="index.html", 
+        context={"posts": posts, "user": user}
+    )
+
+
+@app.get("/auth/vk")
+async def vk_auth(request: Request):
+    """Перенаправляет на VK OAuth для авторизации."""
+    import urllib.parse
+    
+    vk_auth_url = "https://oauth.vk.com/authorize"
+    params = {
+        "client_id": settings.vk_client_id,
+        "redirect_uri": settings.vk_redirect_uri,
+        "response_type": "code",
+        "scope": "offline,groups,wall,photos",
+        "v": "5.199",
+    }
+    
+    auth_url = f"{vk_auth_url}?{urllib.parse.urlencode(params)}"
+    return RedirectResponse(url=auth_url)
+
+
+@app.get("/auth/vk/callback")
+async def vk_auth_callback(request: Request, db: Session = Depends(get_db)):
+    """Обрабатывает callback от VK OAuth."""
+    code = request.query_params.get("code")
+    
+    if not code:
+        raise HTTPException(status_code=400, detail="Authorization code not provided")
+    
+    # Обмениваем код на токен
+    token_url = "https://oauth.vk.com/access_token"
+    token_data = {
+        "client_id": settings.vk_client_id,
+        "client_secret": settings.vk_client_secret,
+        "redirect_uri": settings.vk_redirect_uri,
+        "code": code,
+    }
+    
+    response = req_lib.post(token_url, data=token_data)
+    result = response.json()
+    
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=f"VK OAuth error: {result['error']}")
+    
+    access_token = result.get("access_token")
+    user_id = result.get("user_id")
+    
+    # Получаем информацию о пользователе
+    try:
+        vk_session = vk_api.VkApi(token=access_token)
+        vk = vk_session.get_api()
+        user_info = vk.users.get(user_ids=user_id)[0]
+    except Exception as e:
+        logger.error(f"Ошибка получения информации о пользователе: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get user info from VK")
+    
+    # Создаем или обновляем пользователя в БД
+    user = db.query(User).filter(User.vk_id == str(user_id)).first()
+    
+    if not user:
+        user = User(
+            vk_id=str(user_id),
+            vk_first_name=user_info.get("first_name", ""),
+            vk_last_name=user_info.get("last_name", ""),
+            vk_photo=user_info.get("photo_200", ""),
+            access_token=access_token,
+            is_active=True
+        )
+        db.add(user)
+        logger.info(f"Создан новый пользователь: {user_info.get('first_name')} {user_info.get('last_name')}")
+    else:
+        user.access_token = access_token
+        user.vk_first_name = user_info.get("first_name", "")
+        user.vk_last_name = user_info.get("last_name", "")
+        user.vk_photo = user_info.get("photo_200", "")
+        user.last_login = datetime.datetime.now()
+        logger.info(f"Пользователь {user_info.get('first_name')} выполнил вход")
+    
+    db.commit()
+    db.refresh(user)
+    
+    # Создаем сессию
+    session_id = secrets.token_urlsafe(32)
+    _session_store[session_id] = {
+        "user_id": user.id,
+        "created_at": datetime.datetime.now()
+    }
+    
+    # Перенаправляем на главную страницу
+    response = RedirectResponse(url="/", status_code=302)
+    response.set_cookie(key="session_id", value=session_id, httponly=True, max_age=86400*7)
+    return response
+
+
+@app.get("/logout")
+async def logout(request: Request):
+    """Выполняет выход пользователя."""
+    session_id = request.cookies.get("session_id")
+    if session_id and session_id in _session_store:
+        del _session_store[session_id]
+    
+    response = RedirectResponse(url="/", status_code=302)
+    response.delete_cookie("session_id")
+    return response
 
 
 # --- API Endpoints ---
