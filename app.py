@@ -89,7 +89,7 @@ templates = Jinja2Templates(directory="web/templates")
 async def index(request: Request, db: Session = Depends(get_db)):
     """Рендерит главную страницу с таблицей постов."""
     posts = db.query(Post).order_by(Post.id.desc()).all()
-    return templates.TemplateResponse("index.html", {"request": request, "posts": posts})
+    return templates.TemplateResponse("index.html", context={"request": request, "posts": posts})
 
 
 # --- API Endpoints ---
