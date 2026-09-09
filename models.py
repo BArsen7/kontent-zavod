@@ -86,6 +86,9 @@ class Post(Base):
     content_plan_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("content_plans.id"), nullable=False, index=True
     )
+    content_plan_period_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("content_plan_periods.id"), nullable=True, index=True
+    )
     post_type: Mapped[str] = mapped_column(String(50), nullable=False)
     topic: Mapped[str] = mapped_column(String(255), nullable=False)
     text_draft: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -100,6 +103,9 @@ class Post(Base):
 
     content_plan: Mapped["ContentPlan"] = relationship(
         "ContentPlan", back_populates="posts"
+    )
+    content_plan_period: Mapped[Optional["ContentPlanPeriod"]] = relationship(
+        "ContentPlanPeriod", back_populates="posts"
     )
     stats: Mapped[list["PostStats"]] = relationship(
         "PostStats", back_populates="post", cascade="all, delete-orphan"
@@ -124,3 +130,43 @@ class PostStats(Base):
     )
 
     post: Mapped["Post"] = relationship("Post", back_populates="stats")
+
+
+class ContentPlanPeriod(Base):
+    """Модель периода контент-плана (неделя, 2 недели, месяц и т.д.)."""
+
+    __tablename__ = "content_plan_periods"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    period_type: Mapped[str] = mapped_column(String(50), nullable=False, default="week")  # week, two_weeks, month
+    start_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    end_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)  # draft, active, completed, archived
+    community_info: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Информация о сообществе
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    user: Mapped["User"] = relationship("User", backref="content_plan_periods")
+    posts: Mapped[list["Post"]] = relationship(
+        "Post", back_populates="content_plan_period", cascade="all, delete-orphan"
+    )
+    chat_messages: Mapped[list["ChatMessage"]] = relationship(
+        "ChatMessage", back_populates="content_plan_period", cascade="all, delete-orphan"
+    )
+
+
+class ChatMessage(Base):
+    """Модель сообщения в чате с контент-менеджером."""
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    content_plan_period_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("content_plan_periods.id"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # user, assistant, system
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    content_plan_period: Mapped["ContentPlanPeriod"] = relationship("ContentPlanPeriod", back_populates="chat_messages")

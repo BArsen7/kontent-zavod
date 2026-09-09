@@ -38,6 +38,6 @@ def get_db():
 def init_db():
     """Инициализация базы данных: создание всех таблиц."""
     # Импортируем модели здесь, чтобы избежать циклических импортов
-    from models import PlatformAccount, ContentPlan, Post, PostStats  # noqa: F401
+    from models import PlatformAccount, ContentPlan, Post, PostStats, ContentPlanPeriod, ChatMessage  # noqa: F401
     
     Base.metadata.create_all(bind=engine)

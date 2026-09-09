@@ -20,6 +20,16 @@ from config import settings
 from database import get_db, init_db
 from models import Post, User, UserCommunity
 from services.content_service import generate_weekly_pack
+from services.content_manager_service import (
+    get_or_create_content_plan_period,
+    add_chat_message,
+    get_chat_history,
+    generate_ai_response,
+    initialize_chat_with_questions,
+    generate_content_plan_from_chat,
+    update_existing_plan,
+    check_and_regenerate_expiring_plan
+)
 from publishers.vk_publisher import VKPublisher
 from managers.community_manager import CommunityManager
 from services.scheduler import start_scheduler
@@ -130,6 +140,17 @@ async def index(request: Request, db: Session = Depends(get_db)):
         request=request, 
         name="index.html", 
         context={"posts": posts, "user": user}
+    )
+
+
+@app.get("/content-manager")
+async def content_manager_page(request: Request, db: Session = Depends(get_db)):
+    """Рендерит страницу контент-менеджера."""
+    user = get_current_user(request, db)
+    return templates.TemplateResponse(
+        request=request,
+        name="content_manager.html",
+        context={"user": user}
     )
 
 
@@ -630,3 +651,246 @@ async def unregister_community(group_id: int) -> Dict[str, Any]:
             status_code=404,
             detail=f"Сообщество {group_id} не найдено"
         )
+
+
+# --- Content Manager (Marketing Assistant) API Endpoints ---
+
+@app.get("/api/content-manager/periods")
+async def get_content_plan_periods(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Возвращает список периодов контент-плана пользователя."""
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Пользователь не авторизован")
+    
+    periods = db.query(ContentPlanPeriod).filter(
+        ContentPlanPeriod.user_id == user.id
+    ).order_by(ContentPlanPeriod.created_at.desc()).all()
+    
+    return {
+        "periods": [
+            {
+                "id": p.id,
+                "period_type": p.period_type,
+                "start_date": p.start_date.isoformat(),
+                "end_date": p.end_date.isoformat(),
+                "status": p.status,
+                "community_info": p.community_info,
+                "created_at": p.created_at.isoformat(),
+                "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+                "posts_count": len(p.posts)
+            }
+            for p in periods
+        ]
+    }
+
+
+@app.post("/api/content-manager/period/create")
+async def create_content_plan_period(
+    request: Request,
+    period_type: str = "week",
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Создаёт новый период контент-плана."""
+    user = require_auth(request, db)
+    
+    # Получаем информацию о сообществах
+    community_info = get_user_community_info(db, user.id)
+    
+    period = get_or_create_content_plan_period(
+        db=db,
+        user_id=user.id,
+        period_type=period_type,
+        community_info=community_info
+    )
+    
+    # Инициализируем чат с вопросами
+    welcome_message = initialize_chat_with_questions(db, period.id)
+    
+    return {
+        "success": True,
+        "period": {
+            "id": period.id,
+            "period_type": period.period_type,
+            "start_date": period.start_date.isoformat(),
+            "end_date": period.end_date.isoformat(),
+            "status": period.status
+        },
+        "welcome_message": welcome_message
+    }
+
+
+@app.get("/api/content-manager/chat/{period_id}")
+async def get_chat_messages(
+    period_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Возвращает историю чата для периода контент-плана."""
+    user = require_auth(request, db)
+    
+    # Проверяем что период принадлежит пользователю
+    period = db.query(ContentPlanPeriod).filter(
+        ContentPlanPeriod.id == period_id,
+        ContentPlanPeriod.user_id == user.id
+    ).first()
+    
+    if not period:
+        raise HTTPException(status_code=404, detail="Период контент-плана не найден")
+    
+    messages = get_chat_history(db, period_id)
+    
+    return {
+        "messages": [
+            {
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat()
+            }
+            for m in messages
+        ]
+    }
+
+
+@app.post("/api/content-manager/chat/{period_id}/send")
+async def send_chat_message(
+    period_id: int,
+    request: Request,
+    message: str,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Отправляет сообщение в чат с контент-менеджером и получает ответ ИИ."""
+    user = require_auth(request, db)
+    
+    # Проверяем что период принадлежит пользователю
+    period = db.query(ContentPlanPeriod).filter(
+        ContentPlanPeriod.id == period_id,
+        ContentPlanPeriod.user_id == user.id
+    ).first()
+    
+    if not period:
+        raise HTTPException(status_code=404, detail="Период контент-плана не найден")
+    
+    # Генерируем ответ ИИ
+    ai_response_text = generate_ai_response(db, period_id, message, user.id)
+    
+    return {
+        "success": True,
+        "user_message": message,
+        "ai_response": ai_response_text
+    }
+
+
+@app.post("/api/content-manager/period/{period_id}/generate-plan")
+async def generate_plan_from_chat(
+    period_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Генерирует контент-план на основе диалога в чате."""
+    user = require_auth(request, db)
+    
+    posts = generate_content_plan_from_chat(db, period_id, user.id)
+    
+    return {
+        "success": True,
+        "message": f"Создано {len(posts)} постов",
+        "posts": posts
+    }
+
+
+@app.put("/api/content-manager/period/{period_id}/update")
+async def update_content_plan(
+    period_id: int,
+    request: Request,
+    modifications: Dict[str, Any],
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Обновляет существующий контент-план (кроме опубликованных постов)."""
+    user = require_auth(request, db)
+    
+    period = update_existing_plan(db, period_id, modifications)
+    
+    return {
+        "success": True,
+        "period": {
+            "id": period.id,
+            "period_type": period.period_type,
+            "status": period.status,
+            "updated_at": period.updated_at.isoformat() if period.updated_at else None
+        }
+    }
+
+
+@app.post("/api/content-manager/check-expiring")
+async def check_expiring_plans(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Проверяет истекающие планы и создаёт новые при необходимости."""
+    user = require_auth(request, db)
+    
+    new_period = check_and_regenerate_expiring_plan(db, user.id)
+    
+    if new_period:
+        return {
+            "success": True,
+            "message": "Создан новый период контент-плана",
+            "new_period": {
+                "id": new_period.id,
+                "period_type": new_period.period_type,
+                "start_date": new_period.start_date.isoformat(),
+                "end_date": new_period.end_date.isoformat()
+            }
+        }
+    else:
+        return {
+            "success": True,
+            "message": "Активный план действителен"
+        }
+
+
+@app.get("/api/content-manager/period/{period_id}/posts")
+async def get_period_posts(
+    period_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Возвращает посты для конкретного периода контент-плана."""
+    user = require_auth(request, db)
+    
+    period = db.query(ContentPlanPeriod).filter(
+        ContentPlanPeriod.id == period_id,
+        ContentPlanPeriod.user_id == user.id
+    ).first()
+    
+    if not period:
+        raise HTTPException(status_code=404, detail="Период контент-плана не найден")
+    
+    posts = db.query(Post).filter(
+        Post.content_plan_period_id == period_id
+    ).order_by(Post.publish_at.asc()).all()
+    
+    return {
+        "period": {
+            "id": period.id,
+            "period_type": period.period_type,
+            "status": period.status
+        },
+        "posts": [
+            {
+                "id": p.id,
+                "post_type": p.post_type,
+                "topic": p.topic,
+                "text_draft": p.text_draft,
+                "text_final": p.text_final,
+                "status": p.status,
+                "publish_at": p.publish_at.isoformat() if p.publish_at else None,
+                "published_at": p.published_at.isoformat() if p.published_at else None
+            }
+            for p in posts
+        ]
+    }

@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Контент-менеджер - Autopilot Content</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .loader {
+            border-top-color: #3498db;
+            -webkit-animation: spinner 1.5s linear infinite;
+            animation: spinner 1.5s linear infinite;
+        }
+        @keyframes spinner {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .chat-message {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            margin-bottom: 12px;
+            word-wrap: break-word;
+        }
+        .chat-message.user {
+            background-color: #3b82f6;
+            color: white;
+            align-self: flex-end;
+            margin-left: auto;
+        }
+        .chat-message.assistant {
+            background-color: #f3f4f6;
+            color: #1f2937;
+            align-self: flex-start;
+        }
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <!-- Header -->
+        <header class="mb-8">
+            <div class="flex justify-between items-center">
+                <div>
+                    <h1 class="text-3xl font-bold text-gray-800">🤖 Персональный контент-менеджер</h1>
+                    <p class="text-gray-600 mt-1">Создайте эффективный контент-план с помощью ИИ</p>
+                </div>
+                <a href="/" class="text-blue-600 hover:text-blue-800 font-medium">← На главную</a>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Left Panel: Period Selection & Info -->
+            <div class="lg:col-span-1 space-y-6">
+                <!-- Create New Period Card -->
+                <div class="bg-white rounded-lg shadow p-6">
+                    <h2 class="text-xl font-semibold text-gray-800 mb-4">Создать новый план</h2>
+                    <p class="text-sm text-gray-600 mb-4">Выберите период планирования:</p>
+                    
+                    <div class="space-y-3">
+                        <button onclick="createPeriod('week')" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-lg transition duration-200">
+                            📅 Неделя (7 постов)
+                        </button>
+                        <button onclick="createPeriod('two_weeks')" class="w-full bg-green-600 hover:bg-green-700 text-white font-medium py-3 px-4 rounded-lg transition duration-200">
+                            📆 2 недели (14 постов)
+                        </button>
+                        <button onclick="createPeriod('month')" class="w-full bg-purple-600 hover:bg-purple-700 text-white font-medium py-3 px-4 rounded-lg transition duration-200">
+                            🗓️ Месяц (30 постов)
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Active Periods List -->
+                <div class="bg-white rounded-lg shadow p-6">
+                    <h2 class="text-xl font-semibold text-gray-800 mb-4">Мои планы</h2>
+                    <div id="periodsList" class="space-y-3">
+                        <div class="text-gray-500 text-sm">Загрузка...</div>
+                    </div>
+                </div>
+
+                <!-- Plan Actions -->
+                <div id="planActions" class="bg-white rounded-lg shadow p-6 hidden">
+                    <h2 class="text-xl font-semibold text-gray-800 mb-4">Действия</h2>
+                    <button onclick="generatePlanFromChat()" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 px-4 rounded-lg transition duration-200 mb-2">
+                        ✨ Сгенерировать план из чата
+                    </button>
+                    <button onclick="checkExpiringPlans()" class="w-full bg-orange-600 hover:bg-orange-700 text-white font-medium py-2 px-4 rounded-lg transition duration-200">
+                        🔄 Проверить истекающие
+                    </button>
+                </div>
+            </div>
+
+            <!-- Right Panel: Chat -->
+            <div class="lg:col-span-2">
+                <div class="bg-white rounded-lg shadow h-[600px] flex flex-col">
+                    <!-- Chat Header -->
+                    <div class="px-6 py-4 border-b border-gray-200">
+                        <h2 class="text-xl font-semibold text-gray-800">Чат с контент-менеджером</h2>
+                        <p id="currentPeriodInfo" class="text-sm text-gray-500 mt-1">Выберите или создайте период для начала работы</p>
+                    </div>
+
+                    <!-- Chat Messages Area -->
+                    <div id="chatMessages" class="flex-1 overflow-y-auto p-6 chat-container">
+                        <div class="text-center text-gray-500 mt-20">
+                            <p class="text-lg">👋 Добро пожаловать!</p>
+                            <p class="text-sm mt-2">Создайте новый период или выберите существующий, чтобы начать диалог с контент-менеджером.</p>
+                        </div>
+                    </div>
+
+                    <!-- Chat Input Area -->
+                    <div class="px-6 py-4 border-t border-gray-200">
+                        <div class="flex space-x-3">
+                            <input 
+                                type="text" 
+                                id="chatInput" 
+                                placeholder="Введите сообщение..." 
+                                class="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                onkeypress="if(event.key === 'Enter') sendMessage()"
+                            >
+                            <button 
+                                onclick="sendMessage()" 
+                                id="sendBtn"
+                                class="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-6 rounded-lg transition duration-200 disabled:opacity-50"
+                            >
+                                Отправить
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Generated Posts Preview -->
+                <div id="postsPreview" class="bg-white rounded-lg shadow p-6 mt-6 hidden">
+                    <h2 class="text-xl font-semibold text-gray-800 mb-4">Сгенерированный контент-план</h2>
+                    <div id="postsList" class="space-y-3">
+                        <!-- Posts will be loaded here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition duration-300 z-50">
+        <span id="toastMessage">Notification</span>
+    </div>
+
+    <script>
+        const API_BASE = '';
+        
+        // State
+        let currentPeriodId = null;
+        let periods = [];
+
+        // Utilities
+        function showToast(message, isError = false) {
+            const toast = document.getElementById('toast');
+            const toastMsg = document.getElementById('toastMessage');
+            toastMsg.textContent = message;
+            toast.classList.remove(isError ? 'bg-gray-800' : 'bg-green-600');
+            toast.classList.add(isError ? 'bg-red-600' : 'bg-green-600');
+            toast.classList.remove('translate-y-20', 'opacity-0');
+            setTimeout(() => {
+                toast.classList.add('translate-y-20', 'opacity-0');
+            }, 3000);
+        }
+
+        function formatDate(isoString) {
+            if (!isoString) return '';
+            const date = new Date(isoString);
+            return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        }
+
+        function getStatusBadge(status) {
+            const badges = {
+                'draft': '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">Черновик</span>',
+                'active': '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">Активен</span>',
+                'completed': '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">Завершён</span>',
+                'archived': '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">Архив</span>'
+            };
+            return badges[status] || status;
+        }
+
+        function getPeriodTypeLabel(type) {
+            const labels = {
+                'week': 'Неделя',
+                'two_weeks': '2 недели',
+                'month': 'Месяц'
+            };
+            return labels[type] || type;
+        }
+
+        // Load periods
+        async function loadPeriods() {
+            try {
+                const response = await fetch(`${API_BASE}/api/content-manager/periods`);
+                if (!response.ok) throw new Error('Ошибка загрузки');
+                const data = await response.json();
+                
+                periods = data.periods || [];
+                renderPeriodsList();
+            } catch (error) {
+                console.error('Ошибка:', error);
+                document.getElementById('periodsList').innerHTML = `
+                    <div class="text-red-500 text-sm">Ошибка загрузки периодов</div>
+                `;
+            }
+        }
+
+        function renderPeriodsList() {
+            const container = document.getElementById('periodsList');
+            
+            if (periods.length === 0) {
+                container.innerHTML = '<div class="text-gray-500 text-sm">Нет активных планов</div>';
+                return;
+            }
+
+            container.innerHTML = periods.map(p => `
+                <div onclick="selectPeriod(${p.id})" class="border rounded-lg p-3 cursor-pointer hover:bg-gray-50 transition ${currentPeriodId === p.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200'}">
+                    <div class="flex justify-between items-start mb-2">
+                        <span class="font-medium text-gray-800">${getPeriodTypeLabel(p.period_type)}</span>
+                        ${getStatusBadge(p.status)}
+                    </div>
+                    <div class="text-xs text-gray-500">
+                        ${formatDate(p.start_date)} - ${formatDate(p.end_date)}
+                    </div>
+                    <div class="text-xs text-gray-400 mt-1">
+                        Постов: ${p.posts_count || 0}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function selectPeriod(periodId) {
+            currentPeriodId = periodId;
+            const period = periods.find(p => p.id === periodId);
+            
+            if (period) {
+                document.getElementById('currentPeriodInfo').textContent = 
+                    `${getPeriodTypeLabel(period.period_type)}: ${formatDate(period.start_date)} - ${formatDate(period.end_date)}`;
+                document.getElementById('planActions').classList.remove('hidden');
+                loadChatMessages();
+                loadPeriodPosts();
+            }
+            
+            renderPeriodsList();
+        }
+
+        // Create period
+        async function createPeriod(periodType) {
+            try {
+                const response = await fetch(`${API_BASE}/api/content-manager/period/create`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ period_type: periodType })
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok && result.success) {
+                    showToast(`Период создан!`);
+                    currentPeriodId = result.period.id;
+                    await loadPeriods();
+                    selectPeriod(currentPeriodId);
+                    
+                    // Display welcome message
+                    const chatContainer = document.getElementById('chatMessages');
+                    chatContainer.innerHTML = `
+                        <div class="chat-message assistant">
+                            ${result.welcome_message.replace(/\n/g, '<br>')}
+                        </div>
+                    `;
+                } else {
+                    throw new Error(result.detail || 'Ошибка создания периода');
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
+        // Load chat messages
+        async function loadChatMessages() {
+            if (!currentPeriodId) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/content-manager/chat/${currentPeriodId}`);
+                if (!response.ok) throw new Error('Ошибка загрузки');
+                const data = await response.json();
+                
+                renderChatMessages(data.messages || []);
+            } catch (error) {
+                console.error('Ошибка:', error);
+            }
+        }
+
+        function renderChatMessages(messages) {
+            const container = document.getElementById('chatMessages');
+            
+            if (messages.length === 0) {
+                container.innerHTML = `
+                    <div class="text-center text-gray-500 mt-20">
+                        <p class="text-lg">💬 Начните диалог с контент-менеджером!</p>
+                        <p class="text-sm mt-2">Расскажите о вашем сообществе и целях</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = messages.map(m => `
+                <div class="chat-message ${m.role}">
+                    <div class="text-xs opacity-75 mb-1">${m.role === 'user' ? 'Вы' : 'Контент-менеджер'}</div>
+                    <div>${m.content.replace(/\n/g, '<br>')}</div>
+                </div>
+            `).join('');
+            
+            // Scroll to bottom
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // Send message
+        async function sendMessage() {
+            const input = document.getElementById('chatInput');
+            const message = input.value.trim();
+            
+            if (!message || !currentPeriodId) {
+                if (!currentPeriodId) {
+                    showToast('Сначала создайте или выберите период', true);
+                }
+                return;
+            }
+
+            const sendBtn = document.getElementById('sendBtn');
+            sendBtn.disabled = true;
+            input.value = '';
+
+            // Add user message to chat
+            const chatContainer = document.getElementById('chatMessages');
+            const userMsgHtml = `
+                <div class="chat-message user">
+                    <div class="text-xs opacity-75 mb-1">Вы</div>
+                    <div>${message.replace(/</g, '&lt;')}</div>
+                </div>
+            `;
+            chatContainer.insertAdjacentHTML('beforeend', userMsgHtml);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+
+            try {
+                const response = await fetch(`${API_BASE}/api/content-manager/chat/${currentPeriodId}/send`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: message })
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok && result.success) {
+                    // Add AI response
+                    const aiMsgHtml = `
+                        <div class="chat-message assistant">
+                            <div class="text-xs opacity-75 mb-1">Контент-менеджер</div>
+                            <div>${result.ai_response.replace(/\n/g, '<br>').replace(/</g, '&lt;')}</div>
+                        </div>
+                    `;
+                    chatContainer.insertAdjacentHTML('beforeend', aiMsgHtml);
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                } else {
+                    throw new Error(result.detail || 'Ошибка отправки сообщения');
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            } finally {
+                sendBtn.disabled = false;
+            }
+        }
+
+        // Generate plan from chat
+        async function generatePlanFromChat() {
+            if (!currentPeriodId) {
+                showToast('Выберите период', true);
+                return;
+            }
+
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = 'Генерация...';
+
+            try {
+                const response = await fetch(`${API_BASE}/api/content-manager/period/${currentPeriodId}/generate-plan`, {
+                    method: 'POST'
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok && result.success) {
+                    showToast(`Создано ${result.posts.length} постов!`);
+                    loadPeriodPosts();
+                } else {
+                    throw new Error(result.detail || 'Ошибка генерации');
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '✨ Сгенерировать план из чата';
+            }
+        }
+
+        // Load period posts
+        async function loadPeriodPosts() {
+            if (!currentPeriodId) return;
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/content-manager/period/${currentPeriodId}/posts`);
+                if (!response.ok) throw new Error('Ошибка загрузки');
+                const data = await response.json();
+                
+                renderPostsList(data.posts || []);
+            } catch (error) {
+                console.error('Ошибка:', error);
+            }
+        }
+
+        function renderPostsList(posts) {
+            const container = document.getElementById('postsList');
+            const previewDiv = document.getElementById('postsPreview');
+            
+            if (posts.length === 0) {
+                previewDiv.classList.add('hidden');
+                return;
+            }
+
+            previewDiv.classList.remove('hidden');
+            
+            container.innerHTML = posts.map(p => `
+                <div class="border rounded-lg p-4 hover:bg-gray-50 transition">
+                    <div class="flex justify-between items-start mb-2">
+                        <span class="font-medium text-gray-800">${p.topic || 'Без темы'}</span>
+                        <span class="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-600">${p.post_type}</span>
+                    </div>
+                    <div class="text-sm text-gray-600 line-clamp-2">
+                        ${(p.text_draft || p.text_final || '').substring(0, 150)}...
+                    </div>
+                    <div class="mt-2 flex justify-between items-center">
+                        <span class="text-xs text-gray-400">
+                            ${p.publish_at ? 'Публикация: ' + formatDate(p.publish_at) : ''}
+                        </span>
+                        <span class="px-2 py-1 text-xs rounded-full ${
+                            p.status === 'published' ? 'bg-green-100 text-green-800' :
+                            p.status === 'approved' ? 'bg-blue-100 text-blue-800' :
+                            'bg-yellow-100 text-yellow-800'
+                        }">
+                            ${p.status === 'published' ? 'Опубликован' :
+                              p.status === 'approved' ? 'Одобрен' :
+                              'Черновик'}
+                        </span>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Check expiring plans
+        async function checkExpiringPlans() {
+            try {
+                const response = await fetch(`${API_BASE}/api/content-manager/check-expiring`, {
+                    method: 'POST'
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok && result.success) {
+                    if (result.new_period) {
+                        showToast('Создан новый период!');
+                        await loadPeriods();
+                    } else {
+                        showToast('Текущий план действителен');
+                    }
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            loadPeriods();
+        });
+    </script>
+</body>
+</html>
