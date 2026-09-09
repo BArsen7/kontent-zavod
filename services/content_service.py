@@ -147,8 +147,8 @@ def generate_weekly_pack(niche: str = "3d_cookies", db: Session = None) -> List[
             try:
                 image_path = generate_kandinsky(
                     prompt=image_prompt,
-                    api_key=settings.GIGACHAT_KEY,
-                    secret_key=settings.GIGACHAT_SECRET,
+                    api_key=settings.gigachat_key,
+                    secret_key=settings.gigachat_secret,
                     save_dir="data/media"
                 )
                 logger.info(f"Изображение сохранено: {image_path}")
