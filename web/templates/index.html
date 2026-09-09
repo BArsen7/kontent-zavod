@@ -20,15 +20,40 @@
 <body class="bg-gray-100 min-h-screen">
     <div class="container mx-auto px-4 py-8">
         <!-- Header -->
-        <header class="mb-8 flex justify-between items-center">
-            <h1 class="text-3xl font-bold text-gray-800">🍪 Autopilot Content</h1>
-            <button 
-                onclick="generateWeekly()" 
-                id="genBtn"
-                class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-lg shadow transition duration-200 flex items-center">
-                <span id="genBtnText">✨ Сгенерировать пак на неделю</span>
-                <div id="genLoader" class="loader ease-linear rounded-full border-2 border-t-2 border-gray-200 h-5 w-5 ml-2 hidden"></div>
-            </button>
+        <header class="mb-8">
+            <div class="flex justify-between items-center mb-4">
+                <h1 class="text-3xl font-bold text-gray-800">🍪 Autopilot Content</h1>
+                <div class="flex items-center space-x-4">
+                    <!-- Блок авторизации -->
+                    <div id="authBlock">
+                        <!-- Загружается динамически -->
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Блок выбора сообщества (только для авторизованных) -->
+            <div id="communitySelectorBlock" class="hidden bg-white p-4 rounded-lg shadow mb-4">
+                <div class="flex items-center space-x-4">
+                    <label class="text-sm font-medium text-gray-700">Сообщество:</label>
+                    <select id="communitySelect" class="border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                        <option value="">Выберите сообщество...</option>
+                    </select>
+                    <button onclick="showAddTokenModal()" class="bg-green-600 hover:bg-green-700 text-white text-sm font-semibold py-2 px-4 rounded-md shadow transition duration-200">
+                        + Добавить сообщество
+                    </button>
+                </div>
+            </div>
+            
+            <!-- Кнопка генерации (только для авторизованных с сообществом) -->
+            <div id="generateBlock" class="hidden">
+                <button 
+                    onclick="generateWeekly()" 
+                    id="genBtn"
+                    class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-lg shadow transition duration-200 flex items-center">
+                    <span id="genBtnText">✨ Сгенерировать пак на неделю</span>
+                    <div id="genLoader" class="loader ease-linear rounded-full border-2 border-t-2 border-gray-200 h-5 w-5 ml-2 hidden"></div>
+                </button>
+            </div>
         </header>
 
         <!-- Stats Summary -->
@@ -79,6 +104,30 @@
         </div>
     </div>
 
+    <!-- Modal for adding community token -->
+    <div id="addTokenModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+            <h3 class="text-lg font-semibold text-gray-800 mb-4">Добавить сообщество ВКонтакте</h3>
+            <p class="text-sm text-gray-600 mb-4">Введите токен доступа сообщества. Вы должны быть администратором сообщества.</p>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">ID сообщества (group_id)</label>
+                <input type="number" id="modalGroupId" class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Например: 123456789">
+            </div>
+            
+            <div class="mb-4">
+                <label class="block text-sm font-medium text-gray-700 mb-1">Токен доступа</label>
+                <textarea id="modalToken" rows="3" class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="vk1.a.ABC..."></textarea>
+                <p class="text-xs text-gray-500 mt-1">Как получить токен: создайте Standalone-приложение в VK Developers и получите токен с правами groups,wall,photos</p>
+            </div>
+            
+            <div class="flex justify-end space-x-2">
+                <button onclick="hideAddTokenModal()" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-md">Отмена</button>
+                <button onclick="submitAddToken()" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md">Добавить</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Notification -->
     <div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition duration-300">
         <span id="toastMessage">Notification</span>
@@ -86,6 +135,11 @@
 
     <script>
         const API_BASE = '';
+        
+        // Глобальное состояние
+        let currentUser = null;
+        let userCommunities = [];
+        let currentGroupId = null;
 
         // Утилиты
         function showToast(message, isError = false) {
@@ -245,8 +299,153 @@
             }
         }
 
+        // Функции авторизации и управления сообществами
+        async function loadUserInfo() {
+            try {
+                const response = await fetch(`${API_BASE}/api/user/me`);
+                if (response.ok) {
+                    const user = await response.json();
+                    currentUser = user;
+                    renderAuthBlock();
+                    await loadUserCommunities();
+                } else {
+                    currentUser = null;
+                    renderAuthBlock();
+                }
+            } catch (error) {
+                console.error('Ошибка загрузки информации о пользователе:', error);
+                currentUser = null;
+                renderAuthBlock();
+            }
+        }
+
+        function renderAuthBlock() {
+            const authBlock = document.getElementById('authBlock');
+            if (currentUser) {
+                authBlock.innerHTML = `
+                    <div class="flex items-center space-x-3">
+                        ${currentUser.vk_photo ? `<img src="${currentUser.vk_photo}" alt="Avatar" class="w-8 h-8 rounded-full border border-gray-300">` : ''}
+                        <span class="text-sm text-gray-700">${currentUser.vk_first_name || ''} ${currentUser.vk_last_name || ''}</span>
+                        <a href="/logout" class="text-sm text-red-600 hover:text-red-800">Выйти</a>
+                    </div>
+                `;
+            } else {
+                authBlock.innerHTML = `
+                    <a href="/auth/vk" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold py-2 px-4 rounded-md shadow transition duration-200 flex items-center">
+                        <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 24 24"><path d="M15.073 2H8.937C5.009 2 2 4.922 2 8.753v6.494C2 19.078 4.922 22 8.853 22h6.22c3.844 0 6.922-2.922 6.922-6.84V8.753C22 4.922 19.078 2 15.073 2zM20.44 15.16c0 .68-.34 1.02-1.1 1.02h-2.38c-.6 0-.85-.25-1.19-.68-.34-.42-.76-.68-1.1-.68s-.6.17-.6.59v.6c0 .42-.17.68-.76.68h-1.7c-2.21 0-4.08-1.1-5.61-3.4-1.53-2.21-2.8-4.93-2.8-5.1 0-.25.17-.42.51-.42h2.38c.51 0 .68.17.85.6.6 1.36 1.61 2.54 2.04 2.54.17 0 .25-.08.25-.42V8.5c-.08-.76-.42-1.1-.85-1.1-.34 0-.6.17-.6.17-.17 0-.25-.08-.25-.25V5.7c0-.34.08-.51.34-.68.17-.08.51-.17 1.1-.25.76-.08 1.28.08 1.53.51.25.42.34 1.1.34 2.12v2.3c0 .34.08.51.25.51.17 0 .43-.17.85-.6.43-.42 1.11-1.36 1.53-2.29.09-.25.34-.42.68-.42h2.38c.6 0 .76.25.76.51 0 .34-.68 2.04-2.21 4.08-.42.6-.6 1.02-.6 1.28 0 .17.09.34.34.51.51.59 1.02 1.19 1.19 1.61z"/></svg>
+                        Войти через ВКонтакте
+                    </a>
+                `;
+            }
+        }
+
+        async function loadUserCommunities() {
+            try {
+                const response = await fetch(`${API_BASE}/api/user/communities`);
+                if (response.ok) {
+                    const data = await response.json();
+                    userCommunities = data.communities || [];
+                    renderCommunitySelector();
+                    checkAccess();
+                } else {
+                    userCommunities = [];
+                    renderCommunitySelector();
+                }
+            } catch (error) {
+                console.error('Ошибка загрузки сообществ:', error);
+                userCommunities = [];
+                renderCommunitySelector();
+            }
+        }
+
+        function renderCommunitySelector() {
+            const selector = document.getElementById('communitySelect');
+            if (!selector) return;
+            
+            selector.innerHTML = '<option value="">Выберите сообщество...</option>';
+            userCommunities.forEach(comm => {
+                const option = document.createElement('option');
+                option.value = comm.group_id;
+                option.textContent = `${comm.group_name} (${comm.group_id})`;
+                selector.appendChild(option);
+            });
+            
+            // Восстанавливаем выбранное сообщество
+            if (currentGroupId) {
+                selector.value = currentGroupId;
+            }
+        }
+
+        function checkAccess() {
+            const hasCommunities = userCommunities.length > 0;
+            const selectorBlock = document.getElementById('communitySelectorBlock');
+            const generateBlock = document.getElementById('generateBlock');
+            
+            if (currentUser && hasCommunities) {
+                selectorBlock.classList.remove('hidden');
+                generateBlock.classList.remove('hidden');
+            } else if (currentUser) {
+                selectorBlock.classList.remove('hidden');
+                generateBlock.classList.add('hidden');
+            } else {
+                selectorBlock.classList.add('hidden');
+                generateBlock.classList.add('hidden');
+            }
+        }
+
+        function showAddTokenModal() {
+            document.getElementById('addTokenModal').classList.remove('hidden');
+            document.getElementById('addTokenModal').classList.add('flex');
+        }
+
+        function hideAddTokenModal() {
+            document.getElementById('addTokenModal').classList.add('hidden');
+            document.getElementById('addTokenModal').classList.remove('flex');
+            document.getElementById('modalGroupId').value = '';
+            document.getElementById('modalToken').value = '';
+        }
+
+        async function submitAddToken() {
+            const groupId = document.getElementById('modalGroupId').value;
+            const token = document.getElementById('modalToken').value.trim();
+            
+            if (!groupId || !token) {
+                showToast('Заполните все поля', true);
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/api/user/communities/add`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ group_id: parseInt(groupId), token: token })
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok && result.success) {
+                    showToast(`Сообщество ${result.group_name} добавлено!`);
+                    hideAddTokenModal();
+                    await loadUserCommunities();
+                } else {
+                    throw new Error(result.detail || result.error || 'Ошибка добавления сообщества');
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
+        // Обработчик изменения сообщества
+        document.getElementById('communitySelect')?.addEventListener('change', function(e) {
+            currentGroupId = e.target.value ? parseInt(e.target.value) : null;
+            // Здесь можно добавить логику фильтрации постов по сообществу
+        });
+
         // Инициализация
-        document.addEventListener('DOMContentLoaded', loadPosts);
+        document.addEventListener('DOMContentLoaded', () => {
+            loadUserInfo();
+            loadPosts();
+        });
     </script>
 </body>
 </html>
