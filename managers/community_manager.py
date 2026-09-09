@@ -67,15 +67,20 @@ class CommunityManager:
             loaded_count = 0
             for account in accounts:
                 try:
+                    # Пытаемся преобразовать account_id в int для group_id
+                    # Если не получается (например, 'test_group'), пропускаем запись
+                    group_id = int(account.account_id)
                     community = CommunityAccount(
                         id=account.id,
                         platform=account.platform,
                         account_id=account.account_id,
                         access_token=account.access_token,
-                        group_id=int(account.account_id)
+                        group_id=group_id
                     )
                     self.register_community(community)
                     loaded_count += 1
+                except ValueError:
+                    logger.warning(f"Пропущена запись сообщества {account.account_id}: не удалось преобразовать в числовой ID")
                 except Exception as e:
                     logger.error(f"Ошибка загрузки сообщества {account.account_id}: {e}")
             
