@@ -5,11 +5,15 @@ from typing import List, Dict, Any
 import datetime
 import threading
 
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
+import base64
+import os
+from pathlib import Path
 
 from config import settings
 from database import get_db, init_db
@@ -82,6 +86,11 @@ app.add_middleware(
 # Шаблоны
 templates = Jinja2Templates(directory="web/templates")
 
+# Статические файлы (для загруженных изображений)
+static_path = Path("data/media")
+static_path.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(static_path)), name="static")
+
 
 # --- Web Routes ---
 
@@ -90,6 +99,17 @@ async def index(request: Request, db: Session = Depends(get_db)):
     """Рендерит главную страницу с таблицей постов."""
     posts = db.query(Post).order_by(Post.id.desc()).all()
     return templates.TemplateResponse(request=request, name="index.html", context={"posts": posts})
+
+
+@app.get("/post/{post_id}")
+async def post_detail(request: Request, post_id: int, db: Session = Depends(get_db)):
+    """Рендерит страницу редактирования поста."""
+    post = db.query(Post).filter(Post.id == post_id).first()
+    
+    if not post:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    
+    return templates.TemplateResponse(request=request, name="post_detail.html", context={"post": post})
 
 
 # --- API Endpoints ---
@@ -337,3 +357,170 @@ async def unregister_community(group_id: int) -> Dict[str, Any]:
             status_code=404,
             detail=f"Сообщество {group_id} не найдено"
         )
+
+
+# --- API Endpoints для редактирования постов ---
+
+@app.put("/api/posts/{post_id}")
+async def update_post(
+    post_id: int,
+    request_data: dict,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    Обновляет данные поста.
+    
+    Args:
+        post_id: ID поста.
+        request_data: Данные для обновления (post_type, topic, text, images, approve).
+    """
+    post = db.query(Post).filter(Post.id == post_id).first()
+    
+    if not post:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    
+    # Обновление полей
+    if "post_type" in request_data:
+        post.post_type = request_data["post_type"]
+    if "topic" in request_data:
+        post.topic = request_data["topic"]
+    if "text" in request_data:
+        post.text_final = request_data["text"]
+    if "images" in request_data:
+        # Сохраняем изображения как CSV строку
+        images = request_data["images"][:10]  # Максимум 10
+        if images:
+            # Если это base64, сохраняем в файлы
+            processed_images = []
+            for img in images:
+                if img.startswith("data:image"):
+                    # Это base64 изображение, сохраняем в файл
+                    try:
+                        header, encoded = img.split(",", 1)
+                        image_data = base64.b64decode(encoded)
+                        filename = f"{post_id}_{len(processed_images)}_{os.urandom(8).hex()}.png"
+                        file_path = static_path / filename
+                        with open(file_path, "wb") as f:
+                            f.write(image_data)
+                        processed_images.append(f"/static/{filename}")
+                    except Exception as e:
+                        logger.error(f"Ошибка сохранения изображения: {e}")
+                        continue
+                else:
+                    # Это уже URL
+                    processed_images.append(img)
+            
+            post.image_url = ",".join(processed_images)
+    
+    # Одобрение если запрошено
+    if request_data.get("approve"):
+        if post.status == "draft":
+            post.status = "approved"
+    
+    db.commit()
+    db.refresh(post)
+    
+    logger.info(f"Пост ID {post_id} обновлён")
+    
+    return {
+        "success": True,
+        "post_id": post_id,
+        "status": post.status
+    }
+
+
+@app.post("/api/generate/text")
+async def generate_text_endpoint(request_data: dict) -> Dict[str, Any]:
+    """
+    Генерирует текст поста с помощью ИИ.
+    
+    Args:
+        request_data: {"topic": str, "post_type": str}
+    """
+    from generators.text_generator import generate_text
+    
+    topic = request_data.get("topic", "Уютная выпечка")
+    post_type = request_data.get("post_type", "benefit")
+    
+    type_names = {
+        "benefit": "польза",
+        "engagement": "вовлечение", 
+        "entertainment": "развлечение",
+        "sales": "продажа"
+    }
+    
+    prompt = f"Напиши короткий пост для соцсетей на тему '{topic}' в формате '{type_names.get(post_type, 'пост')}'. Текст должен быть тёплым, дружелюбным, без излишней официальности. Добавь эмодзи. Длина 100-200 слов."
+    
+    try:
+        text = generate_text(prompt)
+        return {"text": text}
+    except Exception as e:
+        logger.error(f"Ошибка генерации текста: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/generate/rewrite")
+async def rewrite_text_endpoint(request_data: dict) -> Dict[str, Any]:
+    """
+    Переписывает выделенный фрагмент текста с помощью ИИ.
+    
+    Args:
+        request_data: {"text": str, "context": str}
+    """
+    from generators.text_generator import generate_text
+    
+    text_to_rewrite = request_data.get("text", "")
+    context = request_data.get("context", "")
+    
+    if not text_to_rewrite.strip():
+        raise HTTPException(status_code=400, detail="Текст для переписывания пуст")
+    
+    prompt = f"Перефразируй следующий текст, сохранив смысл, но сделав его более живым и интересным. Контекст: {context[:500]}... Текст для перефразирования: {text_to_rewrite}"
+    
+    try:
+        rewritten = generate_text(prompt)
+        return {"rewritten_text": rewritten}
+    except Exception as e:
+        logger.error(f"Ошибка переписывания текста: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/generate/image")
+async def generate_image_endpoint(request_data: dict) -> Dict[str, Any]:
+    """
+    Генерирует изображение по промпту.
+    
+    Args:
+        request_data: {"prompt": str}
+    """
+    from generators.image_generator import generate_kandinsky
+    
+    prompt = request_data.get("prompt", "")
+    
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="Промпт пуст")
+    
+    # Улучшаем промпт с помощью ИИ
+    try:
+        from generators.text_generator import generate_text
+        
+        enhance_prompt = f"Преобразуй этот запрос в детальный промпт для генерации изображения на английском языке. Добавь детали об освещении, композиции, стиле. Запрос: {prompt}"
+        enhanced = generate_text(enhance_prompt, use_local=True)
+        
+        if enhanced:
+            prompt = enhanced
+    except Exception as e:
+        logger.warning(f"Не удалось улучшить промпт: {e}")
+    
+    try:
+        # Генерируем изображение через Kandinsky
+        image_path = generate_kandinsky(
+            prompt=prompt,
+            api_key=settings.gigachat_key or "",
+            secret_key=settings.gigachat_secret or ""
+        )
+        
+        return {"image_path": image_path}
+    except Exception as e:
+        logger.error(f"Ошибка генерации изображения: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
