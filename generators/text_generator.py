@@ -35,7 +35,7 @@ def generate_text_ollama(
         ConnectionError: Если не удалось подключиться к Ollama.
         RuntimeError: Если API вернуло ошибку.
     """
-    url = f"{settings.OLLAMA_URL}/api/generate"
+    url = f"{settings.ollama_url}/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
@@ -60,7 +60,7 @@ def generate_text_ollama(
         
     except requests.exceptions.ConnectionError as e:
         logger.error(f"Ошибка подключения к Ollama: {e}")
-        raise ConnectionError(f"Не удалось подключиться к Ollama по адресу {settings.OLLAMA_URL}. Убедитесь, что сервис запущен.")
+        raise ConnectionError(f"Не удалось подключиться к Ollama по адресу {settings.ollama_url}. Убедитесь, что сервис запущен.")
     except requests.exceptions.Timeout:
         logger.error("Таймаут при запросе к Ollama")
         raise TimeoutError("Превышено время ожидания ответа от Ollama")
@@ -89,7 +89,7 @@ def generate_text_gigachat(
     Raises:
         RuntimeError: Если не удалось получить токен или сгенерировать ответ.
     """
-    if not settings.GIGACHAT_KEY or not settings.GIGACHAT_SECRET:
+    if not settings.gigachat_key or not settings.gigachat_secret:
         raise RuntimeError("GigaChat credentials не настроены в .env файле")
     
     auth_url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
@@ -107,8 +107,8 @@ def generate_text_gigachat(
             },
             data={
                 "scope": "GIGACHAT_API_PERS",
-                "client_id": settings.GIGACHAT_KEY,
-                "client_secret": settings.GIGACHAT_SECRET
+                "client_id": settings.gigachat_key,
+                "client_secret": settings.gigachat_secret
             },
             timeout=30
         )

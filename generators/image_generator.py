@@ -26,7 +26,7 @@ def _get_gigachat_token() -> str:
     """
     auth_url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     
-    if not settings.GIGACHAT_KEY or not settings.GIGACHAT_SECRET:
+    if not settings.gigachat_key or not settings.gigachat_secret:
         raise RuntimeError("GigaChat credentials не настроены в .env файле")
     
     logger.info("Получение токена авторизации для Kandinsky через GigaChat")
@@ -40,8 +40,8 @@ def _get_gigachat_token() -> str:
             },
             data={
                 "scope": "GIGACHAT_API_PERS",
-                "client_id": settings.GIGACHAT_KEY,
-                "client_secret": settings.GIGACHAT_SECRET
+                "client_id": settings.gigachat_key,
+                "client_secret": settings.gigachat_secret
             },
             timeout=30
         )
