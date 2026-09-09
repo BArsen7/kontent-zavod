@@ -1,4 +1,2 @@
-```
-__pycache__/
-*.pyc
-```
+# No changes needed - only source/config files were modified
+# README.md and web/templates/index.html are source files that should not be ignored
