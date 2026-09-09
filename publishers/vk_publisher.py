@@ -145,7 +145,7 @@ class VKPublisher(BasePublisher):
         logger.debug(f"Post text length: {len(text)} characters")
 
         try:
-            vk_api_instance = self.vk_session.api
+            vk_api_instance = self.vk_session.get_api()
             attachments = []
 
             # Upload and attach photo if provided
