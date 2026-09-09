@@ -411,6 +411,155 @@ async def get_status():
     return {"status": "ok", "version": "1.0.0"}
 
 
+@app.get("/api/user/me")
+async def get_current_user_info(request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Возвращает информацию о текущем авторизованном пользователе."""
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Пользователь не авторизован")
+    
+    return {
+        "id": user.id,
+        "vk_id": user.vk_id,
+        "vk_first_name": user.vk_first_name,
+        "vk_last_name": user.vk_last_name,
+        "vk_photo": user.vk_photo,
+        "is_active": user.is_active
+    }
+
+
+@app.get("/api/user/communities")
+async def get_user_communities(request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Возвращает список сообществ текущего пользователя."""
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Пользователь не авторизован")
+    
+    communities = db.query(UserCommunity).filter(UserCommunity.user_id == user.id).all()
+    
+    return {
+        "communities": [
+            {
+                "id": comm.id,
+                "group_id": comm.group_id,
+                "group_name": comm.group_name or f"Сообщество {comm.group_id}",
+                "is_admin": comm.is_admin,
+                "can_post": comm.can_post
+            }
+            for comm in communities
+        ]
+    }
+
+
+@app.post("/api/user/communities/add")
+async def add_user_community(
+    request: Request,
+    group_id: int,
+    token: str,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Добавляет новое сообщество для текущего пользователя после проверки прав."""
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Пользователь не авторизован")
+    
+    # Проверяем токен и получаем информацию о сообществе через VK API
+    try:
+        vk_session = vk_api.VkApi(token=token)
+        vk = vk_session.get_api()
+        
+        # Получаем информацию о группе
+        group_info = vk.groups.getById(group_id=group_id)[0]
+        
+        # Проверяем, является ли пользователь администратором
+        # Для этого используем метод groups.getCatalog (доступен только админам)
+        # или проверяем через groups.get с фильтром
+        try:
+            # Пытаемся получить информацию о участниках - доступно только админам
+            members = vk.groups.getMembers(group_id=group_id, filter="admins")
+            is_admin = any(str(user.vk_id) == str(m['user_id']) for m in members.get('items', []))
+            
+            if not is_admin:
+                # Альтернативная проверка: пробуем получить доступ к управлению
+                admin_check = vk.groups.getLongPollServer(group_id=group_id)
+                is_admin = True
+        except vk_api.exceptions.ApiError:
+            raise HTTPException(
+                status_code=403, 
+                detail="У вас нет прав администратора в этом сообществе"
+            )
+        
+        group_name = group_info.get("name", f"Группа {group_id}")
+        
+    except vk_api.exceptions.AuthError:
+        raise HTTPException(status_code=400, detail="Неверный токен доступа")
+    except Exception as e:
+        logger.error(f"Ошибка проверки токена VK: {e}")
+        raise HTTPException(status_code=400, detail=f"Ошибка проверки токена: {str(e)}")
+    
+    # Проверяем, не добавлено ли уже это сообщество
+    existing = db.query(UserCommunity).filter(
+        UserCommunity.user_id == user.id,
+        UserCommunity.group_id == group_id
+    ).first()
+    
+    if existing:
+        raise HTTPException(status_code=400, detail="Это сообщество уже добавлено")
+    
+    # Добавляем сообщество в БД
+    user_community = UserCommunity(
+        user_id=user.id,
+        group_id=group_id,
+        group_name=group_name,
+        group_token=token,
+        is_admin=True,
+        can_post=True
+    )
+    db.add(user_community)
+    db.commit()
+    db.refresh(user_community)
+    
+    logger.info(f"Пользователь {user.vk_id} добавил сообщество {group_name} ({group_id})")
+    
+    return {
+        "success": True,
+        "group_id": group_id,
+        "group_name": group_name,
+        "message": f"Сообщество {group_name} успешно добавлено"
+    }
+
+
+@app.delete("/api/user/communities/{group_id}")
+async def remove_user_community(
+    request: Request,
+    group_id: int,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Удаляет сообщество из списка пользователя."""
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Пользователь не авторизован")
+    
+    community = db.query(UserCommunity).filter(
+        UserCommunity.user_id == user.id,
+        UserCommunity.group_id == group_id
+    ).first()
+    
+    if not community:
+        raise HTTPException(status_code=404, detail="Сообщество не найдено")
+    
+    db.delete(community)
+    db.commit()
+    
+    logger.info(f"Пользователь {user.vk_id} удалил сообщество {group_id}")
+    
+    return {
+        "success": True,
+        "group_id": group_id,
+        "message": "Сообщество удалено"
+    }
+
+
 @app.get("/api/communities")
 async def get_communities():
     """Возвращает список всех зарегистрированных сообществ."""
