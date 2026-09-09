@@ -432,11 +432,11 @@ def run_vk_bot():
     """
     global _vk_bot
 
-    if not settings.VK_TOKEN:
+    if not settings.vk_token:
         logger.warning("VK_TOKEN не настроен. VK бот не будет запущен.")
         return
 
-    if not settings.VK_GROUP_ID:
+    if not settings.vk_group_id:
         logger.warning("VK_GROUP_ID не настроен. VK бот не будет запущен.")
         return
 
@@ -444,7 +444,7 @@ def run_vk_bot():
         logger.warning("VK бот уже запущен")
         return
 
-    _vk_bot = VKBot(token=settings.VK_TOKEN, group_id=settings.VK_GROUP_ID)
+    _vk_bot = VKBot(token=settings.vk_token, group_id=settings.vk_group_id)
 
     # Запускаем бота в отдельном потоке
     bot_thread = threading.Thread(target=_vk_bot.run, name="VKBotThread", daemon=True)

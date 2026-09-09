@@ -45,8 +45,8 @@ def check_and_publish():
         
         # Инициализируем паблишер
         publisher = VKPublisher(
-            token=settings.VK_TOKEN,
-            group_id=settings.VK_GROUP_ID
+            token=settings.vk_token,
+            group_id=settings.vk_group_id
         )
         
         for post in posts_to_publish:
@@ -109,7 +109,7 @@ def start_scheduler():
         logger.warning("Планировщик уже запущен")
         return
     
-    if not settings.VK_TOKEN or not settings.VK_GROUP_ID:
+    if not settings.vk_token or not settings.vk_group_id:
         logger.warning("VK_TOKEN или VK_GROUP_ID не настроены. Планировщик не будет запущен.")
         return
     
