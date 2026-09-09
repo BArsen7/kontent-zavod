@@ -16,7 +16,7 @@ from database import get_db, init_db
 from models import Post
 from services.content_service import generate_weekly_pack
 from publishers.vk_publisher import VKPublisher
-from bots.vk_bot import run_vk_bot
+from managers.community_manager import CommunityManager
 from services.scheduler import start_scheduler
 
 # Настройка логирования
@@ -26,17 +26,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Инициализация БД при старте, запуск бота и планировщика
+# Инициализация БД при старте, запуск CommunityManager и планировщика
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Инициализация базы данных...")
     init_db()
     logger.info("База данных готова")
     
-    # Запускаем VK бота в отдельном потоке
-    logger.info("Запуск VK бота...")
-    bot_thread = threading.Thread(target=run_vk_bot, name="VKBotStartup", daemon=True)
-    bot_thread.start()
+    # Запускаем CommunityManager (мастер-бот) в отдельном потоке
+    logger.info("Запуск CommunityManager (мастер-бот для управления множественными сообществами)...")
+    
+    # Создаём глобальный экземпляр менеджера
+    app.state.community_manager = CommunityManager()
+    
+    community_thread = threading.Thread(
+        target=_run_community_manager,
+        args=(app.state.community_manager,),
+        name="CommunityManager",
+        daemon=True
+    )
+    community_thread.start()
     
     # Запускаем планировщик публикаций в отдельном потоке
     logger.info("Запуск планировщика публикаций...")
@@ -46,6 +55,13 @@ async def lifespan(app: FastAPI):
     yield
     
     logger.info("Завершение работы приложения")
+    if hasattr(app.state, 'community_manager'):
+        app.state.community_manager.stop()
+
+
+def _run_community_manager(manager: CommunityManager):
+    """Функция для запуска CommunityManager в потоке."""
+    manager.run()
 
 app = FastAPI(
     title="Autopilot Content",
@@ -162,9 +178,14 @@ async def approve_post(post_id: int, db: Session = Depends(get_db)) -> Dict[str,
 
 
 @app.post("/api/publish/vk/{post_id}")
-async def publish_vk(post_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def publish_vk(
+    post_id: int,
+    group_id: int | None = None,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
     """
-    Публикует пост ВКонтакте через VKPublisher.
+    Публикует пост ВКонтакте через CommunityManager.
+    Если group_id не указан, публикует в первое доступное сообщество.
     Меняет статус на 'published' при успехе.
     """
     post = db.query(Post).filter(Post.id == post_id).first()
@@ -183,23 +204,31 @@ async def publish_vk(post_id: int, db: Session = Depends(get_db)) -> Dict[str, A
     if not text_to_publish:
         raise HTTPException(status_code=400, detail="У поста нет текста для публикации")
     
-    logger.info(f"Публикация поста ID {post_id} ВКонтакте")
+    # Получаем менеджер сообществ
+    community_manager = app.state.community_manager
+    
+    # Если group_id не указан, используем первое доступное сообщество
+    if group_id is None:
+        communities = community_manager.get_community_list()
+        if not communities:
+            raise HTTPException(
+                status_code=400,
+                detail="Нет зарегистрированных сообществ. Добавьте сообщество через /add_token"
+            )
+        group_id = communities[0]["group_id"]
+        logger.info(f"group_id не указан, используем первое сообщество: {group_id}")
+    
+    logger.info(f"Публикация поста ID {post_id} в сообщество {group_id}")
     
     try:
-        # Инициализируем паблишер
-        publisher = VKPublisher(
-            token=settings.VK_TOKEN,
-            group_id=settings.VK_GROUP_ID
-        )
-        
         # Формируем данные для публикации
         post_data = {
             "text": text_to_publish,
             "image_path": post.image_url if post.image_url else None
         }
         
-        # Публикуем
-        result = publisher.publish(post_data)
+        # Публикуем через CommunityManager
+        result = community_manager.publish_to_community(group_id, post_data)
         
         if result.get("success"):
             # Обновляем статус в БД
@@ -213,12 +242,13 @@ async def publish_vk(post_id: int, db: Session = Depends(get_db)) -> Dict[str, A
             return {
                 "success": True,
                 "post_id": post_id,
+                "group_id": group_id,
                 "platform_post_id": result.get("post_id"),
                 "url": result.get("url"),
                 "status": post.status
             }
         else:
-            logger.error(f"Ошибка публикации от VKPublisher: {result.get('error')}")
+            logger.error(f"Ошибка публикации от CommunityManager: {result.get('error')}")
             raise HTTPException(
                 status_code=500,
                 detail=result.get("error", "Неизвестная ошибка при публикации")
@@ -235,3 +265,75 @@ async def publish_vk(post_id: int, db: Session = Depends(get_db)) -> Dict[str, A
 async def get_status():
     """Простой эндпоинт для проверки работоспособности API."""
     return {"status": "ok", "version": "1.0.0"}
+
+
+@app.get("/api/communities")
+async def get_communities():
+    """Возвращает список всех зарегистрированных сообществ."""
+    if not hasattr(app.state, 'community_manager'):
+        return {"communities": [], "error": "CommunityManager ещё не инициализирован"}
+    
+    communities = app.state.community_manager.get_community_list()
+    return {"communities": communities}
+
+
+@app.post("/api/communities/register")
+async def register_community(
+    token: str,
+    group_id: int,
+) -> Dict[str, Any]:
+    """
+    Регистрирует новое сообщество для управления.
+    
+    Args:
+        token: Токен доступа сообщества VK API.
+        group_id: ID группы VK.
+    """
+    if not hasattr(app.state, 'community_manager'):
+        raise HTTPException(status_code=503, detail="CommunityManager ещё не инициализирован")
+    
+    from managers.community_manager import CommunityAccount
+    
+    community = CommunityAccount(
+        id=0,
+        platform="vk",
+        account_id=str(group_id),
+        access_token=token,
+        group_id=group_id
+    )
+    
+    if app.state.community_manager.register_community(community):
+        return {
+            "success": True,
+            "group_id": group_id,
+            "message": f"Сообщество {group_id} успешно зарегистрировано"
+        }
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Не удалось зарегистрировать сообщество {group_id}. Проверьте токен и права доступа."
+        )
+
+
+@app.delete("/api/communities/{group_id}")
+async def unregister_community(group_id: int) -> Dict[str, Any]:
+    """
+    Удаляет сообщество из управления.
+    
+    Args:
+        group_id: ID группы для удаления.
+    """
+    if not hasattr(app.state, 'community_manager'):
+        raise HTTPException(status_code=503, detail="CommunityManager ещё не инициализирован")
+    
+    if app.state.community_manager.unregister_community(group_id):
+        return {
+            "success": True,
+            "group_id": group_id,
+            "message": f"Сообщество {group_id} удалено из управления"
+        }
+    else:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Сообщество {group_id} не найдено"
+        )
