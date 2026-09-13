@@ -9,8 +9,9 @@ import secrets
 
 import vk_api
 import requests as req_lib
+from passlib.context import CryptContext
 
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Response
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Response, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -101,6 +102,19 @@ templates = Jinja2Templates(directory="web/templates")
 # В продакшене использовать Redis или базу данных
 _session_store: Dict[str, Dict[str, Any]] = {}
 
+# Контекст для хеширования паролей
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def hash_password(password: str) -> str:
+    """Хеширует пароль."""
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Проверяет соответствие пароля хешу."""
+    return pwd_context.verify(plain_password, hashed_password)
+
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optional[User]:
     """Получает текущего пользователя из сессии."""
@@ -154,83 +168,82 @@ async def content_manager_page(request: Request, db: Session = Depends(get_db)):
     )
 
 
-@app.get("/auth/vk")
-async def vk_auth(request: Request):
-    """Перенаправляет на VK OAuth для авторизации."""
-    import urllib.parse
-    
-    vk_auth_url = "https://oauth.vk.com/authorize"
-    params = {
-        "client_id": settings.vk_client_id,
-        "redirect_uri": settings.vk_redirect_uri,
-        "response_type": "code",
-        "scope": "offline,groups,wall,photos",
-        "v": "5.199",
-    }
-    
-    auth_url = f"{vk_auth_url}?{urllib.parse.urlencode(params)}"
-    return RedirectResponse(url=auth_url)
+@app.get("/login")
+async def login_page(request: Request, db: Session = Depends(get_db)):
+    """Рендерит страницу входа."""
+    user = get_current_user(request, db)
+    if user:
+        return RedirectResponse(url="/", status_code=302)
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={}
+    )
 
 
-@app.get("/auth/vk/callback")
-async def vk_auth_callback(request: Request, db: Session = Depends(get_db)):
-    """Обрабатывает callback от VK OAuth."""
-    code = request.query_params.get("code")
+@app.post("/auth/login")
+async def login(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db)
+):
+    """Обрабатывает вход пользователя по email и паролю."""
+    user = db.query(User).filter(User.email == email).first()
     
-    if not code:
-        raise HTTPException(status_code=400, detail="Authorization code not provided")
+    if not user or not verify_password(password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Неверный email или пароль")
     
-    # Обмениваем код на токен
-    token_url = "https://oauth.vk.com/access_token"
-    token_data = {
-        "client_id": settings.vk_client_id,
-        "client_secret": settings.vk_client_secret,
-        "redirect_uri": settings.vk_redirect_uri,
-        "code": code,
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Аккаунт деактивирован")
+    
+    # Создаем сессию
+    session_id = secrets.token_urlsafe(32)
+    _session_store[session_id] = {
+        "user_id": user.id,
+        "created_at": datetime.datetime.now()
     }
     
-    response = req_lib.post(token_url, data=token_data)
-    result = response.json()
+    # Обновляем время последнего входа
+    user.last_login = datetime.datetime.now()
+    db.commit()
     
-    if "error" in result:
-        raise HTTPException(status_code=400, detail=f"VK OAuth error: {result['error']}")
+    logger.info(f"Пользователь {user.email} выполнил вход")
     
-    access_token = result.get("access_token")
-    user_id = result.get("user_id")
+    # Перенаправляем на главную страницу
+    response = RedirectResponse(url="/", status_code=302)
+    response.set_cookie(key="session_id", value=session_id, httponly=True, max_age=86400*7)
+    return response
+
+
+@app.post("/auth/register")
+async def register(
+    request: Request,
+    email: str = Form(...),
+    password: str = Form(...),
+    first_name: str = Form(""),
+    last_name: str = Form(""),
+    db: Session = Depends(get_db)
+):
+    """Регистрирует нового пользователя."""
+    # Проверяем, существует ли пользователь с таким email
+    existing_user = db.query(User).filter(User.email == email).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует")
     
-    # Получаем информацию о пользователе
-    try:
-        vk_session = vk_api.VkApi(token=access_token)
-        vk = vk_session.get_api()
-        user_info = vk.users.get(user_ids=user_id)[0]
-    except Exception as e:
-        logger.error(f"Ошибка получения информации о пользователе: {e}")
-        raise HTTPException(status_code=500, detail="Failed to get user info from VK")
-    
-    # Создаем или обновляем пользователя в БД
-    user = db.query(User).filter(User.vk_id == str(user_id)).first()
-    
-    if not user:
-        user = User(
-            vk_id=str(user_id),
-            vk_first_name=user_info.get("first_name", ""),
-            vk_last_name=user_info.get("last_name", ""),
-            vk_photo=user_info.get("photo_200", ""),
-            access_token=access_token,
-            is_active=True
-        )
-        db.add(user)
-        logger.info(f"Создан новый пользователь: {user_info.get('first_name')} {user_info.get('last_name')}")
-    else:
-        user.access_token = access_token
-        user.vk_first_name = user_info.get("first_name", "")
-        user.vk_last_name = user_info.get("last_name", "")
-        user.vk_photo = user_info.get("photo_200", "")
-        user.last_login = datetime.datetime.now()
-        logger.info(f"Пользователь {user_info.get('first_name')} выполнил вход")
-    
+    # Создаем нового пользователя
+    user = User(
+        email=email,
+        password_hash=hash_password(password),
+        first_name=first_name,
+        last_name=last_name,
+        is_active=True
+    )
+    db.add(user)
     db.commit()
     db.refresh(user)
+    
+    logger.info(f"Зарегистрирован новый пользователь: {email}")
     
     # Создаем сессию
     session_id = secrets.token_urlsafe(32)
@@ -441,10 +454,10 @@ async def get_current_user_info(request: Request, db: Session = Depends(get_db))
     
     return {
         "id": user.id,
-        "vk_id": user.vk_id,
-        "vk_first_name": user.vk_first_name,
-        "vk_last_name": user.vk_last_name,
-        "vk_photo": user.vk_photo,
+        "email": user.email,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "photo": user.photo,
         "is_active": user.is_active
     }
 
@@ -498,12 +511,9 @@ async def add_user_community(
         try:
             # Пытаемся получить информацию о участниках - доступно только админам
             members = vk.groups.getMembers(group_id=group_id, filter="admins")
-            is_admin = any(str(user.vk_id) == str(m['user_id']) for m in members.get('items', []))
-            
-            if not is_admin:
-                # Альтернативная проверка: пробуем получить доступ к управлению
-                admin_check = vk.groups.getLongPollServer(group_id=group_id)
-                is_admin = True
+            # Проверка прав администратора через токен сообщества
+            admin_check = vk.groups.getLongPollServer(group_id=group_id)
+            is_admin = True
         except vk_api.exceptions.ApiError:
             raise HTTPException(
                 status_code=403, 
@@ -540,7 +550,7 @@ async def add_user_community(
     db.commit()
     db.refresh(user_community)
     
-    logger.info(f"Пользователь {user.vk_id} добавил сообщество {group_name} ({group_id})")
+    logger.info(f"Пользователь {user.email} добавил сообщество {group_name} ({group_id})")
     
     return {
         "success": True,
@@ -572,7 +582,7 @@ async def remove_user_community(
     db.delete(community)
     db.commit()
     
-    logger.info(f"Пользователь {user.vk_id} удалил сообщество {group_id}")
+    logger.info(f"Пользователь {user.email} удалил сообщество {group_id}")
     
     return {
         "success": True,

@@ -1,15 +1,15 @@
 ```
-# Python
+# Dependencies
+venv/
+.venv/
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
+.mypy_cache/
+.pytest_cache/
 
-# Database
-*.db
-
-# Logs
+# Logs and temp files
 *.log
+*.tmp
 
 # Environment
 .env
@@ -20,7 +20,8 @@ __pycache__/
 .vscode/
 .idea/
 
-# OS generated files
-.DS_Store
-Thumbs.db
+# Build artifacts
+dist/
+build/
+target/
 ```

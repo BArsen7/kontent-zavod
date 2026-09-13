@@ -11,3 +11,4 @@ apscheduler
 aiogram
 vk-api
 aiohttp-socks
+passlib[bcrypt]
