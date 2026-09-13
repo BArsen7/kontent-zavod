@@ -14,11 +14,11 @@ class User(Base):
     __tablename__ = "users"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    vk_id: Mapped[str] = mapped_column(String(50), nullable=False, unique=True, index=True)
-    vk_first_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    vk_last_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    vk_photo: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
-    access_token: Mapped[str] = mapped_column(String(500), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(500), nullable=False)
+    first_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    last_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    photo: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)

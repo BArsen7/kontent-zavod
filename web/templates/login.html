@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Вход в систему - Autopilot Content</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center">
+    <div class="max-w-md w-full mx-4">
+        <div class="bg-white rounded-lg shadow-lg p-8">
+            <div class="text-center mb-8">
+                <h1 class="text-3xl font-bold text-gray-800">🍪 Autopilot Content</h1>
+                <p class="text-gray-600 mt-2">Вход в систему</p>
+            </div>
+
+            <!-- Форма входа -->
+            <form id="loginForm" action="/auth/login" method="POST" class="space-y-6">
+                <div>
+                    <label for="email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                    <input 
+                        type="email" 
+                        id="email" 
+                        name="email" 
+                        required
+                        class="w-full border border-gray-300 rounded-md px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="your@email.com"
+                    >
+                </div>
+
+                <div>
+                    <label for="password" class="block text-sm font-medium text-gray-700 mb-1">Пароль</label>
+                    <input 
+                        type="password" 
+                        id="password" 
+                        name="password" 
+                        required
+                        class="w-full border border-gray-300 rounded-md px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="••••••••"
+                    >
+                </div>
+
+                <button 
+                    type="submit" 
+                    class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-md shadow transition duration-200"
+                >
+                    Войти
+                </button>
+            </form>
+
+            <!-- Форма регистрации -->
+            <div class="mt-8 pt-6 border-t border-gray-200">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Нет аккаунта? Зарегистрироваться</h2>
+                <form id="registerForm" class="space-y-4">
+                    <div>
+                        <label for="reg_email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                        <input 
+                            type="email" 
+                            id="reg_email" 
+                            required
+                            class="w-full border border-gray-300 rounded-md px-4 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                            placeholder="your@email.com"
+                        >
+                    </div>
+
+                    <div>
+                        <label for="reg_password" class="block text-sm font-medium text-gray-700 mb-1">Пароль</label>
+                        <input 
+                            type="password" 
+                            id="reg_password" 
+                            required
+                            minlength="6"
+                            class="w-full border border-gray-300 rounded-md px-4 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                            placeholder="••••••••"
+                        >
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label for="reg_first_name" class="block text-sm font-medium text-gray-700 mb-1">Имя</label>
+                            <input 
+                                type="text" 
+                                id="reg_first_name" 
+                                class="w-full border border-gray-300 rounded-md px-4 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                                placeholder="Иван"
+                            >
+                        </div>
+
+                        <div>
+                            <label for="reg_last_name" class="block text-sm font-medium text-gray-700 mb-1">Фамилия</label>
+                            <input 
+                                type="text" 
+                                id="reg_last_name" 
+                                class="w-full border border-gray-300 rounded-md px-4 py-2 focus:outline-none focus:ring-2 focus:ring-green-500"
+                                placeholder="Иванов"
+                            >
+                        </div>
+                    </div>
+
+                    <button 
+                        type="submit" 
+                        class="w-full bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-4 rounded-md shadow transition duration-200"
+                    >
+                        Зарегистрироваться
+                    </button>
+                </form>
+            </div>
+
+            <!-- Сообщение об ошибке -->
+            <div id="errorMessage" class="hidden mt-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded-md"></div>
+            
+            <!-- Ссылка на главную -->
+            <div class="mt-6 text-center">
+                <a href="/" class="text-sm text-gray-600 hover:text-gray-800">← Вернуться на главную</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Обработка формы регистрации
+        document.getElementById('registerForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const email = document.getElementById('reg_email').value;
+            const password = document.getElementById('reg_password').value;
+            const first_name = document.getElementById('reg_first_name').value;
+            const last_name = document.getElementById('reg_last_name').value;
+            
+            const errorDiv = document.getElementById('errorMessage');
+            
+            try {
+                const formData = new FormData();
+                formData.append('email', email);
+                formData.append('password', password);
+                formData.append('first_name', first_name);
+                formData.append('last_name', last_name);
+                
+                const response = await fetch('/auth/register', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    window.location.href = '/';
+                } else {
+                    errorDiv.textContent = result.detail || 'Ошибка регистрации';
+                    errorDiv.classList.remove('hidden');
+                }
+            } catch (error) {
+                errorDiv.textContent = 'Ошибка соединения с сервером';
+                errorDiv.classList.remove('hidden');
+            }
+        });
+    </script>
+</body>
+</html>
