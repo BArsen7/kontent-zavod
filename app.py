@@ -226,36 +226,65 @@ async def register(
     db: Session = Depends(get_db)
 ):
     """Регистрирует нового пользователя."""
-    # Проверяем, существует ли пользователь с таким email
-    existing_user = db.query(User).filter(User.email == email).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует")
+    logger.info(f"Получен запрос на регистрацию для email: {email}")
     
-    # Создаем нового пользователя
-    user = User(
-        email=email,
-        password_hash=hash_password(password),
-        first_name=first_name,
-        last_name=last_name,
-        is_active=True
-    )
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    
-    logger.info(f"Зарегистрирован новый пользователь: {email}")
-    
-    # Создаем сессию
-    session_id = secrets.token_urlsafe(32)
-    _session_store[session_id] = {
-        "user_id": user.id,
-        "created_at": datetime.datetime.now()
-    }
-    
-    # Перенаправляем на главную страницу
-    response = RedirectResponse(url="/", status_code=302)
-    response.set_cookie(key="session_id", value=session_id, httponly=True, max_age=86400*7)
-    return response
+    try:
+        # Проверяем, существует ли пользователь с таким email
+        logger.info(f"Проверка существования пользователя с email: {email}")
+        existing_user = db.query(User).filter(User.email == email).first()
+        
+        if existing_user:
+            logger.warning(f"Попытка регистрации существующего email: {email}")
+            raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует")
+        
+        # Хешируем пароль
+        logger.info("Хеширование пароля...")
+        password_hash = hash_password(password)
+        
+        # Создаем нового пользователя
+        logger.info(f"Создание нового пользователя: {email}")
+        user = User(
+            email=email,
+            password_hash=password_hash,
+            first_name=first_name,
+            last_name=last_name,
+            is_active=True
+        )
+        
+        logger.info("Добавление пользователя в базу данных...")
+        db.add(user)
+        
+        logger.info("Коммит транзакции...")
+        db.commit()
+        
+        logger.info("Обновление объекта пользователя после коммита...")
+        db.refresh(user)
+        
+        logger.info(f"Пользователь успешно создан с ID: {user.id}")
+        logger.info(f"Зарегистрирован новый пользователь: {email}")
+        
+        # Создаем сессию
+        session_id = secrets.token_urlsafe(32)
+        _session_store[session_id] = {
+            "user_id": user.id,
+            "created_at": datetime.datetime.now()
+        }
+        
+        logger.info(f"Создана сессия для пользователя {user.id}: session_id={session_id[:8]}...")
+        
+        # Перенаправляем на главную страницу
+        response = RedirectResponse(url="/", status_code=302)
+        response.set_cookie(key="session_id", value=session_id, httponly=True, max_age=86400*7)
+        logger.info(f"Регистрация завершена успешно для {email}")
+        return response
+        
+    except HTTPException:
+        logger.error(f"HTTP ошибка при регистрации {email}: статус код и деталь")
+        raise
+    except Exception as e:
+        logger.error(f"Критическая ошибка при регистрации пользователя {email}: {type(e).__name__} - {str(e)}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Ошибка сервера при регистрации: {str(e)}")
 
 
 @app.get("/logout")
