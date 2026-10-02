@@ -8,28 +8,27 @@ import hashlib
 import secrets
 
 import vk_api
-import requests as req_lib
 from passlib.context import CryptContext
 
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Response, Form
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from config import settings
 from database import get_db, init_db
-from models import Post, User, UserCommunity
+from models import ContentPlanPeriod, Post, User, UserCommunity
 from services.content_service import generate_weekly_pack
 from services.content_manager_service import (
     get_or_create_content_plan_period,
-    add_chat_message,
     get_chat_history,
     generate_ai_response,
+    get_user_community_info,
     initialize_chat_with_questions,
     generate_content_plan_from_chat,
     update_existing_plan,
-    check_and_regenerate_expiring_plan
+    check_and_regenerate_expiring_plan,
 )
 from publishers.vk_publisher import VKPublisher
 from managers.community_manager import CommunityManager
@@ -116,9 +115,31 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)
 
 
+def create_session(user: User) -> str:
+    """Создаёт сессию пользователя в памяти и возвращает session_id."""
+    session_id = secrets.token_urlsafe(32)
+    _session_store[session_id] = {
+        "user_id": user.id,
+        "created_at": datetime.datetime.now(),
+    }
+    return session_id
+
+
+SESSION_COOKIE = "session_id"
+SESSION_MAX_AGE = 86400 * 7  # 7 дней
+
+
+def authenticated_redirect(response: RedirectResponse, session_id: str) -> RedirectResponse:
+    """Устанавливает cookie с идентификатором сессии на ответ-редирект."""
+    response.set_cookie(
+        key=SESSION_COOKIE, value=session_id, httponly=True, max_age=SESSION_MAX_AGE
+    )
+    return response
+
+
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optional[User]:
     """Получает текущего пользователя из сессии."""
-    session_id = request.cookies.get("session_id")
+    session_id = request.cookies.get(SESSION_COOKIE)
     if not session_id or session_id not in _session_store:
         return None
     
@@ -197,23 +218,15 @@ async def login(
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Аккаунт деактивирован")
     
-    # Создаем сессию
-    session_id = secrets.token_urlsafe(32)
-    _session_store[session_id] = {
-        "user_id": user.id,
-        "created_at": datetime.datetime.now()
-    }
-    
-    # Обновляем время последнего входа
+    # Создаем сессию и обновляем время последнего входа
+    session_id = create_session(user)
     user.last_login = datetime.datetime.now()
     db.commit()
-    
+
     logger.info(f"Пользователь {user.email} выполнил вход")
-    
+
     # Перенаправляем на главную страницу
-    response = RedirectResponse(url="/", status_code=302)
-    response.set_cookie(key="session_id", value=session_id, httponly=True, max_age=86400*7)
-    return response
+    return authenticated_redirect(RedirectResponse(url="/", status_code=302), session_id)
 
 
 @app.post("/auth/register")
@@ -226,76 +239,46 @@ async def register(
     db: Session = Depends(get_db)
 ):
     """Регистрирует нового пользователя."""
-    logger.info(f"Получен запрос на регистрацию для email: {email}")
-    
+    # Проверяем, существует ли пользователь с таким email
+    existing_user = db.query(User).filter(User.email == email).first()
+    if existing_user:
+        logger.warning(f"Попытка регистрации существующего email: {email}")
+        raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует")
+
+    # Создаем нового пользователя с хешем пароля
+    user = User(
+        email=email,
+        password_hash=hash_password(password),
+        first_name=first_name,
+        last_name=last_name,
+        is_active=True,
+    )
+    db.add(user)
+
     try:
-        # Проверяем, существует ли пользователь с таким email
-        logger.info(f"Проверка существования пользователя с email: {email}")
-        existing_user = db.query(User).filter(User.email == email).first()
-        
-        if existing_user:
-            logger.warning(f"Попытка регистрации существующего email: {email}")
-            raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует")
-        
-        # Хешируем пароль
-        logger.info("Хеширование пароля...")
-        password_hash = hash_password(password)
-        
-        # Создаем нового пользователя
-        logger.info(f"Создание нового пользователя: {email}")
-        user = User(
-            email=email,
-            password_hash=password_hash,
-            first_name=first_name,
-            last_name=last_name,
-            is_active=True
-        )
-        
-        logger.info("Добавление пользователя в базу данных...")
-        db.add(user)
-        
-        logger.info("Коммит транзакции...")
         db.commit()
-        
-        logger.info("Обновление объекта пользователя после коммита...")
         db.refresh(user)
-        
-        logger.info(f"Пользователь успешно создан с ID: {user.id}")
-        logger.info(f"Зарегистрирован новый пользователь: {email}")
-        
-        # Создаем сессию
-        session_id = secrets.token_urlsafe(32)
-        _session_store[session_id] = {
-            "user_id": user.id,
-            "created_at": datetime.datetime.now()
-        }
-        
-        logger.info(f"Создана сессия для пользователя {user.id}: session_id={session_id[:8]}...")
-        
-        # Перенаправляем на главную страницу
-        response = RedirectResponse(url="/", status_code=302)
-        response.set_cookie(key="session_id", value=session_id, httponly=True, max_age=86400*7)
-        logger.info(f"Регистрация завершена успешно для {email}")
-        return response
-        
-    except HTTPException:
-        logger.error(f"HTTP ошибка при регистрации {email}: статус код и деталь")
-        raise
     except Exception as e:
-        logger.error(f"Критическая ошибка при регистрации пользователя {email}: {type(e).__name__} - {str(e)}", exc_info=True)
         db.rollback()
+        logger.error(f"Критическая ошибка при регистрации пользователя {email}: {type(e).__name__} - {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Ошибка сервера при регистрации: {str(e)}")
+
+    logger.info(f"Зарегистрирован новый пользователь: {email} (ID: {user.id})")
+
+    # Создаем сессию и перенаправляем на главную страницу
+    session_id = create_session(user)
+    return authenticated_redirect(RedirectResponse(url="/", status_code=302), session_id)
 
 
 @app.get("/logout")
 async def logout(request: Request):
     """Выполняет выход пользователя."""
-    session_id = request.cookies.get("session_id")
+    session_id = request.cookies.get(SESSION_COOKIE)
     if session_id and session_id in _session_store:
         del _session_store[session_id]
     
     response = RedirectResponse(url="/", status_code=302)
-    response.delete_cookie("session_id")
+    response.delete_cookie(SESSION_COOKIE)
     return response
 
 
@@ -534,15 +517,11 @@ async def add_user_community(
         # Получаем информацию о группе
         group_info = vk.groups.getById(group_id=group_id)[0]
         
-        # Проверяем, является ли пользователь администратором
-        # Для этого используем метод groups.getCatalog (доступен только админам)
-        # или проверяем через groups.get с фильтром
+        # Проверяем права администратора: методы getMembers и getLongPollServer
+        # доступны только токену с соответствующими правами сообщества
         try:
-            # Пытаемся получить информацию о участниках - доступно только админам
-            members = vk.groups.getMembers(group_id=group_id, filter="admins")
-            # Проверка прав администратора через токен сообщества
-            admin_check = vk.groups.getLongPollServer(group_id=group_id)
-            is_admin = True
+            vk.groups.getMembers(group_id=group_id, filter="admins")
+            vk.groups.getLongPollServer(group_id=group_id)
         except vk_api.exceptions.ApiError:
             raise HTTPException(
                 status_code=403, 
