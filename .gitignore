@@ -1,8 +1,1 @@
-# Python bytecode cache
-__pycache__/
-*.pyc
-
-# Environment variables
-.env
-.env.local
-.env.*.local
+(empty)

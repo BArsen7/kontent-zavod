@@ -201,7 +201,15 @@ TG_PROXY_URL=
 LOG_LEVEL=INFO
 ```
 
-> ℹ️ Для добавления сообщества через веб-интерфейс токен сообщества вводится прямо в форме — постоянные `VK_TOKEN`/`VK_GROUP_ID` нужны только планировщику `services/scheduler.py`. Поля `VK_CLIENT_ID`, `VK_CLIENT_SECRET`, `VK_REDIRECT_URI` в `.env.example` зарезервированы под будущий OAuth и текущим кодом не используются.
+> ℹ️ Для добавления сообщества через веб-интерфейс токен сообщества вводится прямо в форме — постоянные `VK_TOKEN`/`VK_GROUP_ID` нужны только планировщику `services/scheduler.py`. Поля `VK_CLIENT_ID`, `VK_CLIENT_SECRET`, `VK_REDIRECT_URI` в `.env.example` зарезервированы под будущий OAuth и текущим кодом не используются (`Settings` игнорирует неизвестные переменные окружения — `extra="ignore"`).
+
+### Возможные ошибки при запуске
+
+**`pydantic_core.ValidationError: Extra inputs are not permitted (vk_client_id ...)`**
+
+Причина: устаревшая версия `config.py`, в которой класс `Settings` не допускал лишних переменных в `.env`, при этом `.env.example` содержит зарезервированные поля `VK_CLIENT_ID`/`VK_CLIENT_SECRET`/`VK_REDIRECT_URI`.
+
+Решение: обновите `config.py` до текущей версии (в `Settings.model_config` добавлен `extra="ignore"`) либо удалите эти строки из своего `.env`. После этого `python app.py` запускается без ошибок.
 
 > ⚠️ **Критично важно**: Никогда не коммитьте файл `.env` в репозиторий! Он добавлен в `.gitignore`. Токены и ключи должны храниться в секрете.
 
@@ -891,6 +899,10 @@ sudo systemctl status autopilot.service
 ### 8. Нужно ли настраивать VK_TOKEN/VK_GROUP_ID в .env?
 
 Только если вы хотите, чтобы **планировщик** (`services/scheduler.py`) публиковал посты автоматически — он использует `VKPublisher` с этими значениями и без них просто не стартует (в логах появится предупреждение). Ручная публикация через `POST /api/publish/vk/{id}` и веб-интерфейс работают через `CommunityManager` с токенами сообществ из БД.
+
+### 9. Приложение падает при запуске: `ValidationError: Extra inputs are not permitted (vk_client_id...)`
+
+Причина: в `.env` остались зарезервированные поля `VK_CLIENT_ID`/`VK_CLIENT_SECRET`/`VK_REDIRECT_URI`, а используется устаревшая версия `config.py` со строгим `Settings`. В текущей версии добавлен `extra="ignore"` — неизвестные переменные окружения игнорируются. Обновите `config.py` (или удалите эти строки из `.env`) и запустите `python app.py` снова. Подробности — в разделе «Возможные ошибки при запуске» инструкции по установке.
 
 ---
 
