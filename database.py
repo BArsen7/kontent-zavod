@@ -34,9 +34,45 @@ def get_db():
         db.close()
 
 
+def _migrate_users_table(conn):
+    """Миграция таблицы users со старой VK OAuth-схемы на email/пароль.
+
+    Старая схема (legacy VK-логин): vk_id, vk_first_name, vk_last_name,
+    vk_photo, access_token. Новая схема: email, password_hash, first_name,
+    last_name, photo. Если в таблице users нет ни одной строки, старую
+    таблицу безопасно пересоздать под новую схему; иначе данные сохраняются
+    как есть и выводится предупреждение (ручной перенос не выполняется).
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if "users" not in inspector.get_table_names():
+        return  # таблицы ещё нет — create_all создаст её по новой модели
+
+    columns = {c["name"] for c in inspector.get_columns("users")}
+    if "email" in columns and "password_hash" in columns:
+        return  # схема уже актуальна
+
+    row_count = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+    if row_count == 0:
+        conn.execute(text("DROP TABLE users"))
+        print("[migration] Пустая таблица users удалена — будет создана заново по новой схеме (email/password)")
+    else:
+        print(
+            f"[migration] ВНИМАНИЕ: таблица users содержит {row_count} строк по устаревшей "
+            "VK-схеме без колонок email/password_hash. Автоматический перенос не выполнен. "
+            "Сделайте резервную копию data/autopilot.db и пересоздайте таблицу вручную либо "
+            "удалите БД для чистой инициализации."
+        )
+
+
 def init_db():
-    """Инициализация базы данных: создание всех таблиц."""
-    # Импортируем модели здесь, чтобы избежать циклических импортов
-    from models import PlatformAccount, ContentPlan, Post, PostStats, ContentPlanPeriod, ChatMessage  # noqa: F401
-    
+    """Инициализация базы данных: миграции и создание всех таблиц."""
+    # Импортируем ВСЕ модели здесь, чтобы избежать циклических импортов
+    # и чтобы create_all создал недостающие таблицы (например, users по новой схеме).
+    import models  # noqa: F401
+
+    with engine.begin() as conn:
+        _migrate_users_table(conn)
+
     Base.metadata.create_all(bind=engine)
