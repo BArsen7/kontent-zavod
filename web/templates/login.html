@@ -135,19 +135,30 @@
                 formData.append('first_name', first_name);
                 formData.append('last_name', last_name);
                 
+                // redirect: 'manual' — сервер отвечает 302 с cookie сессии,
+                // а fetch не может прочитать тело редиректа-ответа (он «opaque»),
+                // из-за чего response.json() бросал исключение и показывалось
+                // ложное «Ошибка соединения с сервером».
                 const response = await fetch('/auth/register', {
                     method: 'POST',
-                    body: formData
+                    body: formData,
+                    redirect: 'manual'
                 });
-                
-                const result = await response.json();
-                
-                if (response.ok) {
+
+                if (response.type === 'opaqueredirect' || response.status === 0 || response.ok || response.redirected) {
+                    // Успешная регистрация: сервер создал сессию и редиректит на главную.
                     window.location.href = '/';
-                } else {
-                    errorDiv.textContent = result.detail || 'Ошибка регистрации';
-                    errorDiv.classList.remove('hidden');
+                    return;
                 }
+
+                // Ожидаем JSON с detail только от ответов без редиректа (4xx/5xx)
+                let message = 'Ошибка регистрации';
+                try {
+                    const result = await response.json();
+                    message = result.detail || message;
+                } catch (e) { /* не-JSON ответ */ }
+                errorDiv.textContent = message;
+                errorDiv.classList.remove('hidden');
             } catch (error) {
                 errorDiv.textContent = 'Ошибка соединения с сервером';
                 errorDiv.classList.remove('hidden');
