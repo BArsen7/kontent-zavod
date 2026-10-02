@@ -570,32 +570,63 @@ async def add_user_community(
     try:
         vk_session = vk_api.VkApi(token=token)
         vk = vk_session.get_api()
-        
+
         # Получаем информацию о группе
         group_info = vk.groups.getById(group_id=group_id)[0]
-        
+
         # Проверяем права администратора: методы getMembers и getLongPollServer
         # доступны только токену с соответствующими правами сообщества
         try:
             vk.groups.getMembers(group_id=group_id, filter="admins")
             vk.groups.getLongPollServer(group_id=group_id)
-        except vk_api.exceptions.ApiError:
+        except vk_api.exceptions.ApiError as perm_err:
+            logger.warning(
+                f"[communities/add] Нет прав администратора для группы {group_id}: {perm_err}"
+            )
             raise HTTPException(
-                status_code=403, 
+                status_code=403,
                 detail="У вас нет прав администратора в этом сообществе"
             )
-        
+
         group_name = group_info.get("name", f"Группа {group_id}")
         logger.info(f"[communities/add] VK API: группа {group_name} ({group_id}), права администратора подтверждены")
-        
-    except vk_api.exceptions.AuthError:
-        logger.warning(f"[communities/add] AuthError: неверный токен (group_id={group_id})")
-        raise HTTPException(status_code=400, detail="Неверный токен доступа")
+
     except HTTPException:
         # Уже сформированная ошибка (например 403 "нет прав") — пробрасываем как есть
         raise
+    except vk_api.exceptions.ApiError as e:
+        # vk_api бросает ApiError (а не AuthError) для ошибки [5] invalid access_token.
+        # Формируем понятное пользователю сообщение вместо технического текста.
+        error_msg = str(e)
+        error_code = getattr(e, 'code', None)
+        logger.warning(
+            f"[communities/add] Ошибка VK API (code={error_code}): {error_msg} "
+            f"(group_id={group_id}, token_prefix={token[:10]}...)"
+        )
+        if error_code == 5:
+            if 'invalid app id' in error_msg or 'client_id' in error_msg:
+                detail = (
+                    "Токен недоступен для этого приложения. Создайте новый ключ сообщества: "
+                    "Сообщество → Управление → Работа с API → Ключи доступа → «Создать ключ», "
+                    "права: manage, photos, wall, messages, notifications."
+                )
+            else:
+                detail = (
+                    "Неверный или просроченный токен доступа. Проверьте, что вы скопировали "
+                    "ключ целиком (он начинается с vk1.a....) и он создан для этого сообщества."
+                )
+        elif error_code == 15:
+            detail = "Для этого метода недостаточно прав токена. Создайте ключ с расширенными правами."
+        elif error_code in (213, 214):
+            detail = f"Сообщество с ID {group_id} не найдено. Укажите числовой ID из настроек сообщества."
+        else:
+            detail = f"Ошибка VK API: {error_msg}"
+        raise HTTPException(status_code=400, detail=detail)
+    except vk_api.exceptions.AuthError:
+        logger.warning(f"[communities/add] AuthError: неверный токен (group_id={group_id})")
+        raise HTTPException(status_code=400, detail="Неверный токен доступа")
     except Exception as e:
-        logger.exception(f"[communities/add] Ошибка проверки токена VK: {e}")
+        logger.exception(f"[communities/add] Неожиданная ошибка проверки токена VK: {e}")
         raise HTTPException(status_code=400, detail=f"Ошибка проверки токена: {str(e)}")
     
     # Проверяем, не добавлено ли уже это сообщество
