@@ -1,6 +1,5 @@
 from datetime import datetime
 from typing import Optional
-import json
 
 from sqlalchemy import String, Integer, ForeignKey, DateTime, Text, JSON, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship

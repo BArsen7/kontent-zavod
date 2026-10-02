@@ -30,13 +30,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     @property
-    def database_url(self) -> str:
-        """Возвращает URL подключения к базе данных SQLite."""
-        return f"sqlite+aiosqlite:///{self.db_path}"
-
-    @property
     def sync_database_url(self) -> str:
-        """Возвращает синхронный URL подключения к базе данных SQLite."""
+        """Возвращает URL подключения к базе данных SQLite."""
         return f"sqlite:///{self.db_path}"
 
 

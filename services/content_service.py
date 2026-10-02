@@ -1,5 +1,4 @@
 import logging
-import uuid
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
