@@ -6,7 +6,7 @@ import threading
 import secrets
 
 import vk_api
-from passlib.context import CryptContext
+import bcrypt as _bcrypt
 
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -98,18 +98,28 @@ templates = Jinja2Templates(directory="web/templates")
 # В продакшене использовать Redis или базу данных
 _session_store: Dict[str, Dict[str, Any]] = {}
 
-# Контекст для хеширования паролей
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Хешмирование паролей напрямую через bcrypt
+# (passlib несовместим с bcrypt >= 4.1: вызывает "password cannot be longer than 72 bytes"
+#  и предупреждение "error reading bcrypt version")
+_BCRYPT_MAX_BYTES = 72
+
+
+def _password_bytes(password: str) -> bytes:
+    """Возвращает байты пароля, обрезанные до 72 байт (лимит bcrypt)."""
+    return password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
 
 
 def hash_password(password: str) -> str:
     """Хеширует пароль."""
-    return pwd_context.hash(password)
+    return _bcrypt.hashpw(_password_bytes(password), _bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Проверяет соответствие пароля хешу."""
-    return pwd_context.verify(plain_password, hashed_password)
+    try:
+        return _bcrypt.checkpw(_password_bytes(plain_password), hashed_password.encode("utf-8"))
+    except ValueError:
+        return False
 
 
 def create_session(user: User) -> str:
