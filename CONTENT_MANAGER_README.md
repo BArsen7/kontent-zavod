@@ -89,8 +89,10 @@ GET    /api/content-manager/period/{period_id}/posts   - Посты период
 
 ## Файлы реализации
 
-- `/workspace/models.py` - Модели ContentPlanPeriod, ChatMessage
-- `/workspace/services/content_manager_service.py` - Бизнес-логика
-- `/workspace/app.py` - API endpoints
-- `/workspace/web/templates/content_manager.html` - WEB интерфейс
-- `/workspace/database.py` - Обновлена инициализация БД
+- `models.py` - Модели ContentPlanPeriod, ChatMessage
+- `services/content_manager_service.py` - Бизнес-логика
+- `app.py` - API endpoints
+- `web/templates/content_manager.html` - WEB интерфейс (страница доступна по адресу `/content-manager`)
+- `database.py` - Инициализация БД (таблицы создаются автоматически при старте приложения)
+
+Все эндпоинты контент-менеджера требуют авторизации: сессия устанавливается после входа по email/паролю на странице `/login` (httponly-cookie `session_id`). Без сессии API возвращает HTTP 401.
