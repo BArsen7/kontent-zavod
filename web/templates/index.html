@@ -122,8 +122,8 @@
             
             <div class="mb-4">
                 <label class="block text-sm font-medium text-gray-700 mb-1">Токен доступа</label>
-                <textarea id="modalToken" rows="3" class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="vk1.a.ABC..."></textarea>
-                <p class="text-xs text-gray-500 mt-1">Как получить токен: создайте Standalone-приложение в VK Developers и получите токен с правами groups,wall,photos</p>
+                <textarea id="modalToken" rows="3" class="w-full border border-gray-300 rounded-md px-3 py-2 font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="vk1.a.ABC..." wrap="off" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
+                <p class="text-xs text-gray-500 mt-1">Как получить токен: ВКонтакте → ваше сообщество → Управление → Работа с API → Ключи доступа → «Создать ключ». Права: manage, photos, wall, messages, notifications. Скопируйте ключ целиком (начинается с vk1.a....) — пробелы и переносы строк недопустимы.</p>
             </div>
             
             <div class="flex justify-end space-x-2">
@@ -422,7 +422,7 @@
 
         async function submitAddToken() {
             const groupId = document.getElementById('modalGroupId').value;
-            const token = document.getElementById('modalToken').value.trim();
+            const token = document.getElementById('modalToken').value.replace(/\s+/g, '');
             
             if (!groupId || !token) {
                 showToast('Заполните все поля', true);
