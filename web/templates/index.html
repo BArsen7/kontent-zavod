@@ -430,22 +430,42 @@
             }
             
             try {
+                console.log('[communities/add] Отправка запроса:', { group_id: parseInt(groupId), token_length: token.length });
                 const response = await fetch(`${API_BASE}/api/user/communities/add`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ group_id: parseInt(groupId), token: token })
                 });
+                console.log('[communities/add] Ответ сервера: status =', response.status);
                 
-                const result = await response.json();
+                const result = await response.json().catch((e) => {
+                    console.error('[communities/add] Не удалось разобрать JSON ответа:', e);
+                    return {};
+                });
+                console.log('[communities/add] Тело ответа:', JSON.stringify(result));
                 
                 if (response.ok && result.success) {
                     showToast(`Сообщество ${result.group_name} добавлено!`);
                     hideAddTokenModal();
                     await loadUserCommunities();
                 } else {
-                    throw new Error(result.detail || result.error || 'Ошибка добавления сообщества');
+                    // FastAPI при 422 возвращает detail в виде массива объектов —
+                    // преобразуем его в читаемую строку, иначе будет "[object Object]"
+                    let message;
+                    if (Array.isArray(result.detail)) {
+                        message = result.detail.map(err => {
+                            const field = (err.loc || []).slice(1).join('.') || 'тело запроса';
+                            return `${field}: ${err.msg}`;
+                        }).join('; ');
+                    } else if (typeof result.detail === 'string') {
+                        message = result.detail;
+                    } else {
+                        message = result.error || `Ошибка добавления сообщества (HTTP ${response.status})`;
+                    }
+                    throw new Error(message);
                 }
             } catch (error) {
+                console.error('[communities/add] Исключение при добавлении сообщества:', error);
                 showToast(error.message, true);
             }
         }
