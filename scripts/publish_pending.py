@@ -124,7 +124,7 @@ def main():
             print(f"  Текст (первые 50 симв.): {post.text_final[:50] if post.text_final else 'N/A'}...")
             
             if args.dry_run:
-                print(f"  → [DRY-RUN] Будет опубликован")
+                print("  → [DRY-RUN] Будет опубликован")
                 skipped_count += 1
                 continue
             
@@ -137,7 +137,7 @@ def main():
             # Проверка наличия текста
             if not post_data["text"]:
                 logger.warning(f"Пост ID={post.id} не имеет текста, пропускаем")
-                print(f"  ⚠️  Пропущен: нет текста")
+                print("  ⚠️  Пропущен: нет текста")
                 skipped_count += 1
                 continue
             

@@ -6,7 +6,6 @@ import logging
 from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import Post

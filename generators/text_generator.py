@@ -1,6 +1,5 @@
 import logging
 import requests
-from typing import Optional
 
 from config import settings
 

@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 
-from models import ContentPlanPeriod, ChatMessage, Post, User, UserCommunity
+from models import ContentPlanPeriod, ChatMessage, Post, UserCommunity
 from generators.text_generator import generate_text
 
 logger = logging.getLogger(__name__)
@@ -356,12 +356,7 @@ def generate_content_plan_from_chat(
     # Создаём посты в БД
     created_posts = []
     now = datetime.now()
-    
-    # Получаем первое сообщество пользователя для привязки
-    first_community = db.query(UserCommunity).filter(
-        UserCommunity.user_id == user_id
-    ).first()
-    
+
     for i, topic_data in enumerate(post_topics[:num_posts]):
         post = Post(
             content_plan_id=1,  # Default content plan, может быть обновлено позже

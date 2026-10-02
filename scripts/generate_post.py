@@ -183,7 +183,7 @@ def main():
         print(f"ID поста: {new_post.id}")
         print(f"Тема: {args.topic}")
         print(f"Тип: {args.type}")
-        print(f"Статус: draft")
+        print("Статус: draft")
         print(f"\nТекст поста:\n{'-' * 40}\n{text_content}\n{'-' * 40}")
         print(f"\nПуть к изображению: {image_path if image_path else 'Не сгенерировано'}")
         print("=" * 60)

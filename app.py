@@ -1,10 +1,8 @@
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import List, Dict, Any, Optional
 import datetime
 import threading
-import hashlib
 import secrets
 
 import vk_api
@@ -30,7 +28,6 @@ from services.content_manager_service import (
     update_existing_plan,
     check_and_regenerate_expiring_plan,
 )
-from publishers.vk_publisher import VKPublisher
 from managers.community_manager import CommunityManager
 from services.scheduler import start_scheduler
 
@@ -828,7 +825,7 @@ async def update_content_plan(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Обновляет существующий контент-план (кроме опубликованных постов)."""
-    user = require_auth(request, db)
+    require_auth(request, db)
     
     period = update_existing_plan(db, period_id, modifications)
     

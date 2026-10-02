@@ -19,7 +19,6 @@ from pathlib import Path
 # Добавляем корень проекта в PATH для импортов
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import settings
 from database import init_db, SessionLocal
 from services.content_service import generate_weekly_pack
 
