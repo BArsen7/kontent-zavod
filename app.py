@@ -9,9 +9,11 @@ import vk_api
 import bcrypt as _bcrypt
 
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Form
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -504,17 +506,65 @@ async def get_user_communities(request: Request, db: Session = Depends(get_db)) 
     }
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Логирует 422 ошибки валидации с деталями (поле, тип ошибки, полученное значение)."""
+    try:
+        body_text = (await request.body()).decode('utf-8', errors='replace')
+    except Exception:
+        body_text = '<не удалось прочитать>'
+    logger.error(
+        f"[422] Валидация не пройдена для {request.method} {request.url.path}: "
+        f"content-type={request.headers.get('content-type')}, "
+        f"errors={exc.errors()}, raw_body={body_text!r}"
+    )
+    # Приводим detail к плоскому списку строк, чтобы клиент не получал "[object Object]"
+    detail = [
+        {
+            "loc": [str(part) for part in err.get("loc", [])],
+            "msg": err.get("msg", ""),
+            "type": err.get("type", ""),
+        }
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
+class AddCommunityRequest(BaseModel):
+    """Схема JSON-тела запроса добавления сообщества."""
+    group_id: int
+    token: str
+
+
 @app.post("/api/user/communities/add")
 async def add_user_community(
     request: Request,
-    group_id: int,
-    token: str,
+    payload: AddCommunityRequest,
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """Добавляет новое сообщество для текущего пользователя после проверки прав."""
+    group_id = payload.group_id
+    token = payload.token
+
+    # Подробное логирование этапа добавления сообщества (для отладки 422/ошибок)
+    logger.info(
+        f"[communities/add] Запрос от пользователя (raw body будет залогирован ниже), "
+        f"group_id={group_id}, token_length={len(token)}, token_prefix={token[:10]}..."
+    )
+    try:
+        raw_body = await request.body()
+        logger.info(
+            f"[communities/add] content-type={request.headers.get('content-type')}, "
+            f"raw_body={raw_body.decode('utf-8', errors='replace')!r}"
+        )
+    except Exception as log_err:
+        logger.warning(f"[communities/add] Не удалось залогировать raw body: {log_err}")
+
     user = get_current_user(request, db)
     if not user:
+        logger.warning(f"[communities/add] 401: пользователь не авторизован (group_id={group_id})")
         raise HTTPException(status_code=401, detail="Пользователь не авторизован")
+    logger.info(f"[communities/add] Пользователь авторизован: id={user.id}, email={user.email}")
     
     # Проверяем токен и получаем информацию о сообществе через VK API
     try:
@@ -536,11 +586,16 @@ async def add_user_community(
             )
         
         group_name = group_info.get("name", f"Группа {group_id}")
+        logger.info(f"[communities/add] VK API: группа {group_name} ({group_id}), права администратора подтверждены")
         
     except vk_api.exceptions.AuthError:
+        logger.warning(f"[communities/add] AuthError: неверный токен (group_id={group_id})")
         raise HTTPException(status_code=400, detail="Неверный токен доступа")
+    except HTTPException:
+        # Уже сформированная ошибка (например 403 "нет прав") — пробрасываем как есть
+        raise
     except Exception as e:
-        logger.error(f"Ошибка проверки токена VK: {e}")
+        logger.exception(f"[communities/add] Ошибка проверки токена VK: {e}")
         raise HTTPException(status_code=400, detail=f"Ошибка проверки токена: {str(e)}")
     
     # Проверяем, не добавлено ли уже это сообщество
@@ -550,6 +605,7 @@ async def add_user_community(
     ).first()
     
     if existing:
+        logger.info(f"[communities/add] Сообщество {group_id} уже добавлено для пользователя id={user.id}")
         raise HTTPException(status_code=400, detail="Это сообщество уже добавлено")
     
     # Добавляем сообщество в БД
