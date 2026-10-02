@@ -2,12 +2,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Настройки приложения, загружаемые из переменных окружения."""
+    """Настройки приложения, загружаемые из переменных окружения.
+
+    Неизвестные переменные в .env игнорируются (extra="ignore"),
+    чтобы наличие зарезервированных или устаревших ключей не ломало запуск.
+    """
 
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
     # Database settings
@@ -22,7 +27,7 @@ class Settings(BaseSettings):
     vk_token: str = ""
     vk_group_id: int = 0
 
-    # Telegram settings
+    # Telegram settings (зарезервировано под будущего Telegram-бота)
     tg_bot_token: str = ""
     tg_proxy_url: str | None = None
 
