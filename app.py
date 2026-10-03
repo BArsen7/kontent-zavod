@@ -578,15 +578,17 @@ async def add_user_community(
         # ВАЖНО (VK API 5.199): метод groups.getById принимает параметр group_ids
         # (строка со значениями через запятую), а НЕ group_id. Значение должно быть
         # ПОЛОЖИТЕЛЬНЫМ числом (без минуса). Метод требует scope `groups` у токена.
-        # Ответ нормализуем: в зависимости от версии vk_api это может быть list
-        # ([{...}]) или dict ({"items": [...], "count": N}).
+        # Формат ответа зависит от версии vk_api:
+        #   - {'groups': [{'id': ..., 'name': ...}], 'profiles': []}  (актуальный формат)
+        #   - [{'id': ..., 'name': ...}]                              (готовый список)
+        #   - {'items': [...], 'count': N}                            (обратная совместимость)
         logger.info(
             f"[communities/add] Вызов groups.getById: group_ids='{abs(int(group_id))}', "
             f"token_mask='{token[:5]}***' (api_version=5.199)"
         )
         result = vk.groups.getById(group_ids=str(abs(int(group_id))))
         if isinstance(result, dict):
-            items = result.get("items", []) or []
+            items = result.get("groups", result.get("items", [])) or []
         elif isinstance(result, list):
             items = result
         else:

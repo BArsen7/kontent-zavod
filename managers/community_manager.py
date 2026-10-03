@@ -127,9 +127,11 @@ class CommunityManager:
             vk_session.auth()
 
             # Получаем информацию о группе для проверки.
-            # groups.getById требует ПОЛОЖИТЕЛЬНЫЙ group_id.
-            # Ответ может быть list ([{...}]) или dict ({"items": [...]}),
-            # поэтому нормализуем его перед обращением к первому элементу.
+            # groups.getById требует ПОЛОЖИТЕЛЬНЫЙ group_id (параметр group_ids — строка).
+            # Формат ответа зависит от версии vk_api:
+            #   - {'groups': [{'id': ..., 'name': ...}], 'profiles': []}  (актуальный формат)
+            #   - [{'id': ..., 'name': ...}]                              (готовый список)
+            #   - {'items': [...], 'count': N}                            (обратная совместимость)
             vk = vk_session.get_api()
             # VK API 5.199: параметр group_ids — строка через запятую, ПОЛОЖИТЕЛЬНЫЙ id.
             result = with_retry(
@@ -138,7 +140,7 @@ class CommunityManager:
                 scope=f"groups.getById(g={community.group_id})",
             )
             if isinstance(result, dict):
-                groups_info = result.get("items", []) or []
+                groups_info = result.get("groups", result.get("items", [])) or []
             elif isinstance(result, list):
                 groups_info = result
             else:
