@@ -8,6 +8,7 @@ group_id внутри системы всегда положительный; ow
 wall/photos вычисляется как -abs(group_id).
 """
 import logging
+import random
 import time
 import threading
 from typing import Optional
@@ -99,16 +100,14 @@ class VKBot:
         params = {
             "peer_id": peer_id,
             "message": message,
-            "random_id": 0,  # Будет заменён на уникальное значение
+            # Уникальный random_id во избежание ошибок дублирования сообщений
+            "random_id": random.randint(0, 2**31 - 1),
         }
 
         if keyboard:
             params["keyboard"] = keyboard
 
         try:
-            # Генерируем случайный random_id
-            import random
-            params["random_id"] = random.randint(0, 2**31 - 1)
             with_retry(self.vk.messages.send, scope="messages.send", **params)
             logger.debug(f"Сообщение отправлено peer_id={peer_id}: {message[:50]}...")
         except ApiError as e:
@@ -434,6 +433,14 @@ class VKBot:
                 time.sleep(5)
             except ApiError as e:
                 describe_api_error(e, scope="longpoll-loop")
+                if getattr(e, "code", 0) == 901:
+                    logger.error(
+                        "LongPoll is disabled (код 901): включите 'Длинный опрос "
+                        "(Long Poll)' в настройках сообщества."
+                    )
+                    self._longpoll = None
+                    time.sleep(30)
+                    continue
                 if getattr(e, "code", 0) == 15:
                     logger.error(
                         "Access denied при запуске LongPoll. Проверьте, что VK_TOKEN — "
