@@ -587,8 +587,36 @@ async def add_user_community(
         # указанного уровня (1 — модератор, 2 — редактор, 3 — администратор).
         # Если список пуст — прав нет; если ошибка [15] — это user-токен, и тогда
         # используем is_admin из getById.
-        group_info = vk.groups.getById(group_id=group_id)[0]
+        #
+        # ВНИМАНИЕ: в зависимости от версии vk_api/ответа VK API метод getById может
+        # вернуть как list ([{...}]), так и dict ({"items": [...], "count": N}).
+        # Обращение по индексу [0] без проверки типа приводило к KeyError: 0.
+        result = vk.groups.getById(group_ids=[group_id])
+        if isinstance(result, dict):
+            items = result.get("items", []) or []
+        elif isinstance(result, list):
+            items = result
+        else:
+            items = []
+        if not items:
+            logger.warning(
+                f"[communities/add] groups.getById вернул пустой ответ для группы "
+                f"{group_id} (сообщество не найдено или токен не имеет к нему доступа)"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Сообщество с ID {group_id} не найдено, либо токен не имеет к нему "
+                    "доступа. Проверьте числовой ID сообщества и что ключ создан именно "
+                    "для этого сообщества."
+                )
+            )
+        group_info = items[0]
         group_name = group_info.get("name", f"Группа {group_id}")
+        logger.info(
+            f"[communities/add] groups.getById: name='{group_name}', "
+            f"is_admin={group_info.get('is_admin', 0)} (0=нет, 1=админ, 2=супер-админ)"
+        )
 
         admin_confirmed = False
         try:
