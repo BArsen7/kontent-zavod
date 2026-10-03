@@ -128,12 +128,20 @@ class CommunityManager:
 
             # Получаем информацию о группе для проверки.
             # groups.getById требует ПОЛОЖИТЕЛЬНЫЙ group_id.
+            # Ответ может быть list ([{...}]) или dict ({"items": [...]}),
+            # поэтому нормализуем его перед обращением к первому элементу.
             vk = vk_session.get_api()
-            groups_info = with_retry(
+            result = with_retry(
                 vk.groups.getById,
-                group_id=community.group_id,
+                group_ids=[community.group_id],
                 scope=f"groups.getById(g={community.group_id})",
             )
+            if isinstance(result, dict):
+                groups_info = result.get("items", []) or []
+            elif isinstance(result, list):
+                groups_info = result
+            else:
+                groups_info = []
 
             if not groups_info or len(groups_info) == 0:
                 logger.error(f"Группа {community.group_id} не найдена или недоступна")
