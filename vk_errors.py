@@ -25,8 +25,26 @@ VK_API_VERSION: str = "5.199"
 # Максимальное количество повторов при ошибкеrate-limit (код 6).
 MAX_RETRIES: int = 3
 
-# Базовая задержка между повторами (секунды), удваивается каждый раз.
-RETRY_BASE_DELAY: float = 1.0
+# Базовая задержка между повторами (секунды) согласно спецификации VK API 5.199,
+# удваивается с каждой попыткой (экспоненциально).
+RETRY_BASE_DELAY: float = 0.5
+
+
+def format_photo_attachment(owner_id: int, photo_id: int) -> str:
+    """
+    Формирует строку вложения для фотографии согласно спецификации VK API 5.199:
+
+        "photo-{abs(owner_id)}_{photo_id}"  (например, "photo-123456_789012")
+
+    Args:
+        owner_id: Владелец фото из ответа photos.saveWallPhoto
+            (для групп — отрицательный, для пользователей — положительный).
+        photo_id: ID фотографии.
+
+    Returns:
+        Строка attachment для wall.post / messages.send.
+    """
+    return f"photo-{abs(int(owner_id))}_{int(photo_id)}"
 
 
 def create_vk_session(token: str) -> vk_api.VkApi:
@@ -65,7 +83,11 @@ def describe_api_error(error: ApiError, scope: str = "") -> str:
         Строка с описанием ошибки и рекомендацией.
     """
     code: int = getattr(error, "code", 0)
-    message: str = str(error)
+    # Безопасное извлечение текста ошибки (у ApiError может отсутствовать .error).
+    try:
+        message: str = str(error)
+    except Exception:
+        message = f"VK API error code {code}"
     prefix = f"[{scope}] " if scope else ""
 
     if code == 6:
@@ -109,6 +131,16 @@ def describe_api_error(error: ApiError, scope: str = "") -> str:
         text = (
             f"{prefix}User authorization failed (код 5): токен недействителен, "
             "истёк или отозван. Выпустите новый сервисный ключ доступа сообщества."
+        )
+        logger.error(text)
+        return text
+
+    if code == 901:
+        text = (
+            f"{prefix}LongPoll is disabled (код 901): Включите 'Длинный опрос (Long Poll)' "
+            "в настройках сообщества: Управление → Настройки → Сообщения → "
+            "«API ключ доступа и Bots Long Poll API» → Получать события — Вкл, "
+            f"версия API — {VK_API_VERSION}."
         )
         logger.error(text)
         return text

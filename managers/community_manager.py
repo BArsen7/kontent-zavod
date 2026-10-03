@@ -9,6 +9,7 @@ group_id внутри системы всегда хранится положи�
 методов wall/photos вычисляется как -abs(group_id).
 """
 import logging
+import random
 import threading
 import time
 from typing import Any, Dict, Optional, List
@@ -27,6 +28,7 @@ from vk_errors import (
     VK_API_VERSION,
     create_vk_session,
     describe_api_error,
+    format_photo_attachment,
     owner_id_for_group,
     positive_group_id,
     with_retry,
@@ -314,7 +316,8 @@ class CommunityManager:
                         photo = uploaded[0]
                         owner_id = photo.get('owner_id')  # для групп уже отрицательный
                         photo_id = photo.get('id')
-                        attachment = f"photo{owner_id}_{photo_id}"
+                        # Формат по спецификации VK API 5.199: "photo-{abs(owner_id)}_{photo_id}"
+                        attachment = format_photo_attachment(owner_id, photo_id)
                         attachments.append(attachment)
                 except ApiError as e:
                     describe_api_error(e, scope=f"photo upload g={group_id}")
@@ -447,6 +450,15 @@ class CommunityManager:
                 time.sleep(5)
             except ApiError as e:
                 describe_api_error(e, scope=f"longpoll(g={group_id})")
+                if getattr(e, "code", 0) == 901:
+                    logger.error(
+                        f"[Группа {group_id}] LongPoll is disabled (код 901): включите "
+                        "'Длинный опрос (Long Poll)' в настройках сообщества "
+                        "(Управление → Настройки → Сообщения → Bots Long Poll API)."
+                    )
+                    self._longpolls.pop(group_id, None)
+                    time.sleep(30)
+                    continue
                 if getattr(e, "code", 0) == 15:
                     logger.error(
                         f"[Группа {group_id}] Access denied при запуске LongPoll. "
@@ -543,7 +555,6 @@ class CommunityManager:
             logger.error(f"Не могу отправить сообщение: группа {group_id} не найдена")
             return
         
-        import random
         params = {
             "peer_id": peer_id,
             "message": message,

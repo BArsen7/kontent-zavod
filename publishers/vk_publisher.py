@@ -19,6 +19,7 @@ from .base_publisher import BasePublisher
 from vk_errors import (
     create_vk_session,
     describe_api_error,
+    format_photo_attachment,
     owner_id_for_group,
     positive_group_id,
     with_retry,
@@ -118,8 +119,9 @@ class VKPublisher(BasePublisher):
                 logger.error(error_msg)
                 raise Exception(error_msg)
 
-            # VK group owner IDs are negative in attachments
-            attachment = f"photo{owner_id}_{photo_id}"
+            # Формат вложения по спецификации VK API 5.199:
+            # "photo-{abs(owner_id)}_{photo_id}" (например, "photo-123456_789012").
+            attachment = format_photo_attachment(owner_id, photo_id)
             logger.info(f"Photo uploaded successfully. Attachment: {attachment}")
             return attachment
 
