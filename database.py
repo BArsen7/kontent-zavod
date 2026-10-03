@@ -85,6 +85,29 @@ def _migrate_content_plan_periods_table(conn) -> None:
         print("[migration] Добавлена колонка content_plan_periods.title")
 
 
+def _migrate_users_is_admin(conn) -> None:
+    """
+    Лёгкая миграция таблицы users.
+
+    Добавляет колонку `is_admin` (права администратора панели), если она
+    отсутствует в существующей базе SQLite. Существующие пользователи
+    получают значение 0 (False) — права выдаются скриптом
+    scripts/make_admin.py.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if "users" not in inspector.get_table_names():
+        return  # таблицы ещё нет — create_all создаст её по новой модели
+
+    columns = {c["name"] for c in inspector.get_columns("users")}
+    if "is_admin" not in columns:
+        conn.execute(
+            text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0")
+        )
+        print("[migration] Добавлена колонка users.is_admin (default False)")
+
+
 def init_db():
     """Инициализация базы данных: миграции и создание всех таблиц."""
     # Импортируем ВСЕ модели здесь, чтобы избежать циклических импортов
@@ -94,5 +117,6 @@ def init_db():
     with engine.begin() as conn:
         _migrate_users_table(conn)
         _migrate_content_plan_periods_table(conn)
+        _migrate_users_is_admin(conn)
 
     Base.metadata.create_all(bind=engine)

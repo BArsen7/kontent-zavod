@@ -19,6 +19,7 @@ class User(Base):
     last_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     photo: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 

@@ -172,6 +172,21 @@ def require_auth(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
+def get_current_admin(request: Request, db: Session = Depends(get_db)) -> User:
+    """Зависимость FastAPI: требует авторизованного пользователя с правами администратора.
+
+    Используется для защиты эндпоинтов панели администратора.
+    Права выдаются скриптом scripts/make_admin.py (поле User.is_admin).
+    """
+    user = get_current_user(request, db)
+    if not user or not getattr(user, "is_admin", False):
+        raise HTTPException(
+            status_code=403,
+            detail="Доступ запрещен. Требуются права администратора.",
+        )
+    return user
+
+
 # --- Web Routes ---
 
 @app.get("/")
