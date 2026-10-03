@@ -571,21 +571,46 @@ async def add_user_community(
         vk_session = vk_api.VkApi(token=token)
         vk = vk_session.get_api()
 
-        # Получаем информацию о группе
+        # Получаем информацию о группе (одновременно проверяем, что группа существует
+        # и токен имеет к ней доступ). Права администратора определяем по полю is_admin
+        # из ответа groups.getById — это нативный способ VK API.
+        # ПРЕЖДЕ здесь вызывался groups.getMembers с фильтром "admins", который VK API
+        # отвергает с ошибкой [100] "filter should be friends, unsure, managers, donut,
+        # unsure_friends, invites or creator" ("admins" — недопустимое значение), и код
+        # ложно интерпретировал эту ошибку как "нет прав администратора".
         group_info = vk.groups.getById(group_id=group_id)[0]
 
-        # Проверяем права администратора: методы getMembers и getLongPollServer
-        # доступны только токену с соответствующими правами сообщества
+        admin_level = group_info.get("is_admin", 0)
+        logger.info(
+            f"[communities/add] groups.getById: name={group_info.get('name')!r}, "
+            f"is_admin={admin_level} (0=нет, 1=админ, 2=супер-админ)"
+        )
+        if not admin_level:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "У вас нет прав администратора в этом сообществе. "
+                    "Важно: ключ доступа должен быть создан именно в настройках ЭТОГО "
+                    "сообщества (Управление → Работа с API → Ключи доступа)."
+                )
+            )
+
+        # Дополнительно проверяем возможность управлять сообществом (нужно для бота):
+        # getLongPollServer доступен только при праве manage у токена.
         try:
-            vk.groups.getMembers(group_id=group_id, filter="admins")
             vk.groups.getLongPollServer(group_id=group_id)
-        except vk_api.exceptions.ApiError as perm_err:
+        except vk_api.exceptions.ApiError as lps_err:
             logger.warning(
-                f"[communities/add] Нет прав администратора для группы {group_id}: {perm_err}"
+                f"[communities/add] getLongPollServer не прошёл для группы {group_id}: {lps_err} "
+                f"(скорее всего, у токена нет права manage)"
             )
             raise HTTPException(
                 status_code=403,
-                detail="У вас нет прав администратора в этом сообществе"
+                detail=(
+                    "Токен не имеет права «manage» (управление сообществом). "
+                    "Создайте новый ключ доступа с максимальными правами: "
+                    "Сообщество → Управление → Работа с API → Ключи доступа."
+                )
             )
 
         group_name = group_info.get("name", f"Группа {group_id}")
