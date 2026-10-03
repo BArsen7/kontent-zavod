@@ -66,6 +66,25 @@ def _migrate_users_table(conn):
         )
 
 
+def _migrate_content_plan_periods_table(conn) -> None:
+    """
+    Лёгкая миграция таблицы content_plan_periods.
+
+    Добавляет колонку `title` (пользовательское название черновика для
+    переименования), если она отсутствует в существующей базе SQLite.
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if "content_plan_periods" not in inspector.get_table_names():
+        return  # таблицы ещё нет — create_all создаст её по новой модели
+
+    columns = {c["name"] for c in inspector.get_columns("content_plan_periods")}
+    if "title" not in columns:
+        conn.execute(text("ALTER TABLE content_plan_periods ADD COLUMN title VARCHAR(255)"))
+        print("[migration] Добавлена колонка content_plan_periods.title")
+
+
 def init_db():
     """Инициализация базы данных: миграции и создание всех таблиц."""
     # Импортируем ВСЕ модели здесь, чтобы избежать циклических импортов
@@ -74,5 +93,6 @@ def init_db():
 
     with engine.begin() as conn:
         _migrate_users_table(conn)
+        _migrate_content_plan_periods_table(conn)
 
     Base.metadata.create_all(bind=engine)

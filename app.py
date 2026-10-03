@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from config import settings
 from database import get_db, init_db
 from models import ContentPlanPeriod, Post, User, UserCommunity
-from services.content_service import generate_weekly_pack
+from services.content_service import generate_weekly_pack, PACK_PERIODS
 from services.content_manager_service import (
     get_or_create_content_plan_period,
     get_chat_history,
@@ -317,37 +317,77 @@ async def get_posts(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
     ]
 
 
-@app.post("/api/generate/weekly")
-async def generate_weekly(
+@app.post("/api/generate/{period_type}")
+async def generate_pack(
+    period_type: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
-    Запускает генерацию недельного пакета постов в фоновом режиме.
+    Запускает генерацию пакета постов в фоновом режиме.
+
+    period_type: 'week' (7 постов), 'two_weeks' (14) или 'month' (30).
+    Обратная совместимость: '/api/generate/weekly' == '/api/generate/week'.
     Возвращает немедленный ответ, не дожидаясь завершения генерации.
     """
-    logger.info("Получен запрос на генерацию недельного пакета")
-    
-    def run_generation():
+    if period_type == "weekly":  # обратная совместимость со старым URL
+        period_type = "week"
+    if period_type not in PACK_PERIODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Неизвестный тип периода '{period_type}'. Доступно: week, two_weeks, month"
+        )
+
+    expected_count = len(PACK_PERIODS[period_type]["post_types"])
+    logger.info(f"Получен запрос на генерацию пакета ({period_type}, {expected_count} постов)")
+
+    def run_generation(pt: str = period_type):
         try:
             # Создаём новую сессию для фонового потока
             from database import SessionLocal
             db_session = SessionLocal()
             try:
-                result = generate_weekly_pack(niche="3d_cookies", db=db_session)
-                logger.info(f"Генерация завершена. Создано постов: {len(result)}")
+                result = generate_weekly_pack(niche="3d_cookies", db=db_session, period_type=pt)
+                logger.info(f"Генерация завершена ({pt}). Создано постов: {len(result)}")
             finally:
                 db_session.close()
         except Exception as e:
             logger.error(f"Ошибка в фоновой генерации: {e}")
-    
+
     background_tasks.add_task(run_generation)
-    
+
     return {
         "status": "started",
         "message": "Генерация запущена в фоновом режиме",
-        "count": 7
+        "period_type": period_type,
+        "count": expected_count
     }
+
+
+@app.delete("/api/posts/{post_id}")
+async def delete_post(
+    post_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Удаляет пост (черновик/одобренный). Опубликованные посты удалять нельзя."""
+    require_auth(request, db)
+
+    post = db.query(Post).filter(Post.id == post_id).first()
+    if not post:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+
+    if post.status == "published":
+        raise HTTPException(
+            status_code=400,
+            detail="Нельзя удалить опубликованный пост"
+        )
+
+    db.delete(post)
+    db.commit()
+    logger.info(f"[posts/delete] Удалён пост id={post_id} (статус: {post.status})")
+
+    return {"success": True, "deleted_post_id": post_id}
 
 
 @app.post("/api/posts/{post_id}/approve")
@@ -835,6 +875,7 @@ async def get_content_plan_periods(
             {
                 "id": p.id,
                 "period_type": p.period_type,
+                "title": p.title or "",
                 "start_date": p.start_date.isoformat(),
                 "end_date": p.end_date.isoformat(),
                 "status": p.status,
@@ -848,18 +889,36 @@ async def get_content_plan_periods(
     }
 
 
+class PeriodCreateRequest(BaseModel):
+    """Тело запроса создания периода контент-плана."""
+    period_type: str = "week"
+
+
+class PeriodRenameRequest(BaseModel):
+    """Тело запроса переименования периода (черновика)."""
+    title: str
+
+
 @app.post("/api/content-manager/period/create")
 async def create_content_plan_period(
     request: Request,
-    period_type: str = "week",
+    payload: PeriodCreateRequest,
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Создаёт новый период контент-плана."""
+    """Создаёт новый период контент-плана на выбранный срок."""
     user = require_auth(request, db)
-    
+
+    period_type = payload.period_type.strip().lower()
+    if period_type not in ("week", "two_weeks", "month"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Недопустимый тип периода '{period_type}'. Доступно: week, two_weeks, month"
+        )
+    logger.info(f"[period/create] Создаём период типа '{period_type}' для пользователя id={user.id}")
+
     # Получаем информацию о сообществах
     community_info = get_user_community_info(db, user.id)
-    
+
     period = get_or_create_content_plan_period(
         db=db,
         user_id=user.id,
@@ -875,6 +934,7 @@ async def create_content_plan_period(
         "period": {
             "id": period.id,
             "period_type": period.period_type,
+            "title": period.title or "",
             "start_date": period.start_date.isoformat(),
             "end_date": period.end_date.isoformat(),
             "status": period.status
@@ -983,6 +1043,101 @@ async def update_content_plan(
             "status": period.status,
             "updated_at": period.updated_at.isoformat() if period.updated_at else None
         }
+    }
+
+
+@app.put("/api/content-manager/period/{period_id}/rename")
+async def rename_content_plan_period(
+    period_id: int,
+    request: Request,
+    payload: PeriodRenameRequest,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Переименовывает период контент-плана (черновик)."""
+    user = require_auth(request, db)
+
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Название не может быть пустым")
+    if len(title) > 255:
+        raise HTTPException(status_code=400, detail="Название слишком длинное (макс. 255 символов)")
+
+    period = db.query(ContentPlanPeriod).filter(
+        ContentPlanPeriod.id == period_id,
+        ContentPlanPeriod.user_id == user.id
+    ).first()
+
+    if not period:
+        raise HTTPException(status_code=404, detail="Период контент-плана не найден")
+
+    old_title = period.title or ""
+    period.title = title
+    period.updated_at = datetime.datetime.now()
+    db.commit()
+    logger.info(f"[period/rename] Период id={period_id}: '{old_title}' -> '{title}' (user id={user.id})")
+
+    return {
+        "success": True,
+        "period": {
+            "id": period.id,
+            "title": period.title,
+            "period_type": period.period_type,
+            "status": period.status
+        }
+    }
+
+
+@app.delete("/api/content-manager/period/{period_id}")
+async def delete_content_plan_period(
+    period_id: int,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """
+    Удаляет период контент-плана вместе с его постами и чатом (cascade в модели).
+
+    Публикации со статусом 'published' или 'scheduled' блокируют удаление,
+    чтобы случайно не удалить уже ушедший в VK контент.
+    """
+    user = require_auth(request, db)
+
+    period = db.query(ContentPlanPeriod).filter(
+        ContentPlanPeriod.id == period_id,
+        ContentPlanPeriod.user_id == user.id
+    ).first()
+
+    if not period:
+        raise HTTPException(status_code=404, detail="Период контент-плана не найден")
+
+    protected_statuses = ("published", "scheduled")
+    protected_posts = db.query(Post).filter(
+        Post.content_plan_period_id == period_id,
+        Post.status.in_(protected_statuses)
+    ).count()
+
+    if protected_posts:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Нельзя удалить: в плане {protected_posts} постов со статусом "
+                "'published'/'scheduled'. Сначала удалите или отмените эти публикации."
+            )
+        )
+
+    posts_count = len(period.posts)
+    chat_count = len(period.chat_messages)
+    db.delete(period)
+    db.commit()
+    logger.info(
+        f"[period/delete] Удалён период id={period_id} (постов: {posts_count}, "
+        f"сообщений чата: {chat_count}) пользователем id={user.id}"
+    )
+
+    return {
+        "success": True,
+        "deleted_period_id": period_id,
+        "deleted_posts": posts_count,
+        "deleted_chat_messages": chat_count
     }
 
 

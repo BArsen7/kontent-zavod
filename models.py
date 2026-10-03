@@ -142,6 +142,7 @@ class ContentPlanPeriod(Base):
     start_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     end_date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)  # draft, active, completed, archived
+    title: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # Пользовательское название черновика
     community_info: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # Информация о сообществе
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
