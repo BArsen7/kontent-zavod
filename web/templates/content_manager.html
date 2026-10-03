@@ -210,6 +210,12 @@
             }
         }
 
+        function escapeHtml(str) {
+            return String(str ?? '').replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[c]));
+        }
+
         function renderPeriodsList() {
             const container = document.getElementById('periodsList');
             
@@ -221,7 +227,9 @@
             container.innerHTML = periods.map(p => `
                 <div onclick="selectPeriod(${p.id})" class="border rounded-lg p-3 cursor-pointer hover:bg-gray-50 transition ${currentPeriodId === p.id ? 'border-blue-500 bg-blue-50' : 'border-gray-200'}">
                     <div class="flex justify-between items-start mb-2">
-                        <span class="font-medium text-gray-800">${getPeriodTypeLabel(p.period_type)}</span>
+                        <span class="font-medium text-gray-800 truncate mr-2" title="${escapeHtml(p.title || getPeriodTypeLabel(p.period_type))}">
+                            ${p.title ? escapeHtml(p.title) : getPeriodTypeLabel(p.period_type)}
+                        </span>
                         ${getStatusBadge(p.status)}
                     </div>
                     <div class="text-xs text-gray-500">
@@ -230,8 +238,79 @@
                     <div class="text-xs text-gray-400 mt-1">
                         Постов: ${p.posts_count || 0}
                     </div>
+                    <div class="flex gap-2 mt-2">
+                        <button onclick="event.stopPropagation(); renamePeriod(${p.id})"
+                                class="text-xs px-2 py-1 rounded border border-gray-300 text-gray-600 hover:bg-gray-100 transition"
+                                title="Переименовать черновик">✏️ Переименовать</button>
+                        <button onclick="event.stopPropagation(); deletePeriod(${p.id})"
+                                class="text-xs px-2 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 transition"
+                                title="Удалить черновик вместе с постами">🗑 Удалить</button>
+                    </div>
                 </div>
             `).join('');
+        }
+
+        // Rename period (draft)
+        async function renamePeriod(periodId) {
+            const period = periods.find(p => p.id === periodId);
+            const currentTitle = (period && period.title) || (period ? getPeriodTypeLabel(period.period_type) : '');
+            const newTitle = prompt('Новое название черновика:', currentTitle);
+            if (newTitle === null) return; // пользователь отменил
+            const trimmed = newTitle.trim();
+            if (!trimmed) {
+                showToast('Название не может быть пустым', true);
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/api/content-manager/period/${periodId}/rename`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: trimmed })
+                });
+                const result = await response.json();
+                if (response.ok && result.success) {
+                    showToast('Черновик переименован');
+                    await loadPeriods();
+                } else {
+                    throw new Error(result.detail || 'Ошибка переименования');
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            }
+        }
+
+        // Delete period (draft) with confirmation
+        async function deletePeriod(periodId) {
+            const period = periods.find(p => p.id === periodId);
+            const name = (period && period.title) || (period ? getPeriodTypeLabel(period.period_type) : '');
+            const postsCount = (period && period.posts_count) || 0;
+            if (!confirm(`Удалить черновик «${name}» и все его посты (${postsCount})? Это действие необратимо.`)) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/api/content-manager/period/${periodId}`, {
+                    method: 'DELETE'
+                });
+                const result = await response.json();
+                if (response.ok && result.success) {
+                    showToast(`Черновик удалён (постов: ${result.deleted_posts})`);
+                    if (currentPeriodId === periodId) {
+                        currentPeriodId = null;
+                        document.getElementById('planActions').classList.add('hidden');
+                        const postsPreview = document.getElementById('postsPreview');
+                        if (postsPreview) postsPreview.classList.add('hidden');
+                        document.getElementById('chatMessages').innerHTML = '';
+                        document.getElementById('currentPeriodInfo').textContent = 'Период не выбран';
+                    }
+                    await loadPeriods();
+                } else {
+                    throw new Error(result.detail || 'Ошибка удаления');
+                }
+            } catch (error) {
+                showToast(error.message, true);
+            }
         }
 
         function selectPeriod(periodId) {
@@ -261,7 +340,7 @@
                 const result = await response.json();
                 
                 if (response.ok && result.success) {
-                    showToast(`Период создан!`);
+                    showToast(`Черновик создан: ${getPeriodTypeLabel(result.period.period_type)}`);
                     currentPeriodId = result.period.id;
                     await loadPeriods();
                     selectPeriod(currentPeriodId);

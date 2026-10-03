@@ -73,14 +73,26 @@ USER_PROMPTS = {
 }
 
 
-def generate_weekly_pack(niche: str = "3d_cookies", db: Session = None) -> List[Dict[str, Any]]:
+# Структуры контент-паков по типу периода (пропорции: польза/вовлечение/развлечение/продажа)
+PACK_PERIODS: Dict[str, Dict[str, Any]] = {
+    "week": {"days": 7, "post_types": ["benefit"] * 3 + ["engagement"] * 2 + ["entertainment"] * 1 + ["sales"] * 1},
+    "two_weeks": {"days": 14, "post_types": ["benefit"] * 5 + ["engagement"] * 4 + ["entertainment"] * 3 + ["sales"] * 2},
+    "month": {"days": 30, "post_types": ["benefit"] * 10 + ["engagement"] * 8 + ["entertainment"] * 7 + ["sales"] * 5},
+}
+
+
+def generate_weekly_pack(
+    niche: str = "3d_cookies",
+    db: Session = None,
+    period_type: str = "week",
+) -> List[Dict[str, Any]]:
     """
-    Генерирует контент-план на неделю (7 постов) для заданной ниши.
-    Структура: 3 польза, 2 вовлечение, 1 развлечение, 1 продажа.
+    Генерирует контент-пакет для заданной ниши (неделя / 2 недели / месяц).
     
     Args:
         niche: Строка с описанием ниши (пока используется хардкод для выпечки).
         db: Сессия базы данных SQLAlchemy.
+        period_type: Тип периода - 'week' (7), 'two_weeks' (14) или 'month' (30 постов).
         
     Returns:
         Список словарей с информацией о созданных постах.
@@ -89,10 +101,19 @@ def generate_weekly_pack(niche: str = "3d_cookies", db: Session = None) -> List[
         logger.error("Сессия БД не передана в generate_weekly_pack")
         raise ValueError("Database session is required")
 
-    logger.info(f"Начинаем генерацию недельного пакета для ниши: {niche}")
+    # Валидация и нормализация типа периода (fallback -> week)
+    if period_type not in PACK_PERIODS:
+        logger.warning(f"Неизвестный period_type='{period_type}', используем 'week'")
+        period_type = "week"
 
-    # Определяем структуру недели
-    post_types = ["benefit"] * 3 + ["engagement"] * 2 + ["entertainment"] * 1 + ["sales"] * 1
+    days = PACK_PERIODS[period_type]["days"]
+    num_posts = len(PACK_PERIODS[period_type]["post_types"])
+    post_types = PACK_PERIODS[period_type]["post_types"]
+
+    logger.info(
+        f"Начинаем генерацию пакета ({period_type}: {num_posts} постов на {days} дн.) "
+        f"для ниши: {niche}"
+    )
     
     # Создаём или получаем контент-план на текущую неделю
     now = datetime.now()
@@ -121,7 +142,7 @@ def generate_weekly_pack(niche: str = "3d_cookies", db: Session = None) -> List[
 
     for i, post_type in enumerate(post_types):
         try:
-            logger.info(f"Генерация поста {i+1}/7 тип: {post_type}")
+            logger.info(f"Генерация поста {i+1}/{num_posts} тип: {post_type}")
             
             # Выбираем промпт
             system_prompt = SYSTEM_PROMPTS.get(post_type, SYSTEM_PROMPTS["benefit"])
@@ -165,7 +186,7 @@ def generate_weekly_pack(niche: str = "3d_cookies", db: Session = None) -> List[
                 image_url=image_path, # Локальный путь
                 image_source="kandinsky" if image_path else None,
                 status="draft",
-                publish_at=now + timedelta(days=i//2), # Примерное время публикации
+                publish_at=now + timedelta(days=(i * days) // num_posts), # Примерное время публикации
                 published_at=None
             )
             
