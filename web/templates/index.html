@@ -45,19 +45,21 @@
             </div>
             
             <!-- Кнопки: генерация пака и переход к контент-менеджеру (только для авторизованных с сообществом) -->
-            <div id="generateBlock" class="hidden flex flex-wrap items-center gap-4">
+            <div id="generateBlock" class="hidden">
+                <div class="flex flex-col items-start gap-4 w-full mb-6 md:flex-row md:flex-nowrap md:items-center">
                 <button 
                     onclick="generateWeekly()" 
                     id="genBtn"
-                    class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-lg shadow transition duration-200 inline-flex items-center whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed">
+                    class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-lg shadow transition duration-200 inline-flex items-center whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0">
                     <span id="genBtnText">✨ Сгенерировать пак на неделю</span>
                     <div id="genLoader" class="loader ease-linear rounded-full border-2 border-t-2 border-gray-200 h-5 w-5 ml-2 hidden"></div>
                 </button>
 
                 <!-- Кнопка перехода к контент-менеджеру -->
-                <a href="/content-manager" class="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-6 rounded-lg shadow transition duration-200 inline-flex items-center whitespace-nowrap">
+                <a href="/content-manager" class="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-6 rounded-lg shadow transition duration-200 inline-flex items-center whitespace-nowrap flex-shrink-0">
                     🤖 Контент-менеджер
                 </a>
+                </div>
             </div>
         </header>
 
