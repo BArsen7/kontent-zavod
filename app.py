@@ -571,27 +571,54 @@ async def add_user_community(
         vk_session = vk_api.VkApi(token=token)
         vk = vk_session.get_api()
 
-        # Получаем информацию о группе (одновременно проверяем, что группа существует
-        # и токен имеет к ней доступ). Права администратора определяем по полю is_admin
-        # из ответа groups.getById — это нативный способ VK API.
-        # ПРЕЖДЕ здесь вызывался groups.getMembers с фильтром "admins", который VK API
-        # отвергает с ошибкой [100] "filter should be friends, unsure, managers, donut,
-        # unsure_friends, invites or creator" ("admins" — недопустимое значение), и код
-        # ложно интерпретировал эту ошибку как "нет прав администратора".
+        # ВАЖНО (актуально для VK API 5.x): поля is_admin/admin_level объекта group
+        # возвращаются только при вызове ОТ ИМЕНИ ПОЛЬЗОВАТЕЛЯ (user token со scope=groups).
+        # Ключ доступа СООБЩЕСТВА (vk1.a....) не «знает», кто его создал, поэтому
+        # groups.getById с таким токеном всегда возвращает is_admin=0 — на прошлом шаге
+        # это давало ложное 403 "нет прав администратора".
+        #
+        # Для ключа сообщества правильный способ проверить права — метод
+        # groups.getByID с параметром min_admin_level (доступен только community token):
+        # вернутся только те сообщества, где создатель токена имеет админа не ниже
+        # указанного уровня (1 — модератор, 2 — редактор, 3 — администратор).
+        # Если список пуст — прав нет; если ошибка [15] — это user-токен, и тогда
+        # используем is_admin из getById.
         group_info = vk.groups.getById(group_id=group_id)[0]
+        group_name = group_info.get("name", f"Группа {group_id}")
 
-        admin_level = group_info.get("is_admin", 0)
-        logger.info(
-            f"[communities/add] groups.getById: name={group_info.get('name')!r}, "
-            f"is_admin={admin_level} (0=нет, 1=админ, 2=супер-админ)"
-        )
-        if not admin_level:
+        admin_confirmed = False
+        try:
+            # Проверяем право manage — оно необходимо боту (long poll, публикация от имени группы).
+            # Вызов с min_admin_level=3 работает ТОЛЬКО с ключом сообщества.
+            res = vk.groups.getByID(group_ids=[group_id], min_admin_level=3)
+            items = res.get("items", []) if isinstance(res, dict) else []
+            admin_confirmed = bool(items) and items[0].get("id") == int(group_id)
+            logger.info(
+                f"[communities/add] groups.getByID(min_admin_level=3) → items={items} "
+                f"(ключ сообщества: права подтверждены, если id совпадает)"
+            )
+        except vk_api.exceptions.ApiError as e:
+            if getattr(e, "code", None) == 15:
+                # Это пользовательский токен — смотрим is_admin в ответе getById
+                admin_level = group_info.get("is_admin", 0)
+                admin_confirmed = bool(admin_level)
+                logger.info(
+                    f"[communities/add] min_admin_level недоступен (user-токен), "
+                    f"is_admin={admin_level} (1=да, 0=нет)"
+                )
+            else:
+                logger.warning(f"[communities/add] groups.getByID(min_admin_level): {e}")
+
+        if not admin_confirmed:
             raise HTTPException(
                 status_code=403,
                 detail=(
-                    "У вас нет прав администратора в этом сообществе. "
-                    "Важно: ключ доступа должен быть создан именно в настройках ЭТОГО "
-                    "сообщества (Управление → Работа с API → Ключи доступа)."
+                    f"Не удалось подтвердить права администратора в сообществе «{group_name}». "
+                    "Используйте КЛЮЧ ДОСТУПА СООБЩЕСТВА, созданный администратором этого "
+                    "сообщества: Сообщество → Управление → Работа с API → Ключи доступа → "
+                    "«Создать ключ» (права: manage, wall, photos, messages), тип: "
+                    "«Ключ сообщества». Пользовательские токены также поддерживаются, но "
+                    "требуют разрешения «Данные сообществ» (scope groups)."
                 )
             )
 
@@ -613,7 +640,6 @@ async def add_user_community(
                 )
             )
 
-        group_name = group_info.get("name", f"Группа {group_id}")
         logger.info(f"[communities/add] VK API: группа {group_name} ({group_id}), права администратора подтверждены")
 
     except HTTPException:
