@@ -2,18 +2,35 @@
 Мастер-бот для управления множественными сообществами VK.
 Позволяет регистрировать несколько сообществ с разными токенами
 и управлять каждым через единый интерфейс.
+
+Работает через VK API версии 5.199+ с сервисными ключами доступа
+сообществ (Community Service Token, права: wall, photos, messages, groups).
+group_id внутри системы всегда хранится положительным; owner_id для
+методов wall/photos вычисляется как -abs(group_id).
 """
 import logging
 import threading
 import time
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
 from dataclasses import dataclass
 
 import vk_api
+from vk_api.exceptions import ApiError
+# В vk_api >= 11.9 отдельного LongPollError нет: ошибки Bots Long Poll API
+# (в т.ч. "Long poll events are disabled") приходят как ApiError.
+LongPollError = ApiError
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 
 from database import SessionLocal
 from models import PlatformAccount, Post
+from vk_errors import (
+    VK_API_VERSION,
+    create_vk_session,
+    describe_api_error,
+    owner_id_for_group,
+    positive_group_id,
+    with_retry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +48,9 @@ class CommunityAccount:
         """Валидация после инициализации."""
         if self.platform != "vk":
             raise ValueError(f"Поддерживается только платформа 'vk', получено: {self.platform}")
+        # group_id внутри системы всегда положительный
+        self.group_id = positive_group_id(self.group_id)
+        self.access_token = self.access_token.strip()
 
 
 class CommunityManager:
@@ -100,20 +120,28 @@ class CommunityManager:
             True если регистрация успешна, False иначе.
         """
         try:
-            # Проверяем валидность токена
-            vk_session = vk_api.VkApi(token=community.access_token)
+            # Проверяем валидность сервисного токена (api_version=5.199)
+            vk_session = create_vk_session(community.access_token)
             vk_session.auth()
-            
-            # Получаем информацию о группе для проверки
+
+            # Получаем информацию о группе для проверки.
+            # groups.getById требует ПОЛОЖИТЕЛЬНЫЙ group_id.
             vk = vk_session.get_api()
-            groups_info = vk.groups.getById(group_id=community.group_id)
-            
+            groups_info = with_retry(
+                vk.groups.getById,
+                group_id=community.group_id,
+                scope=f"groups.getById(g={community.group_id})",
+            )
+
             if not groups_info or len(groups_info) == 0:
                 logger.error(f"Группа {community.group_id} не найдена или недоступна")
                 return False
-            
+
             group_name = groups_info[0].get('name', 'Unknown')
-            logger.info(f"Токен валиден для группы: {group_name} (ID: {community.group_id})")
+            logger.info(
+                f"Сервисный токен валиден для группы: {group_name} "
+                f"(ID: {community.group_id})"
+            )
             
             # Сохраняем в базу данных если ещё нет
             db = SessionLocal()
@@ -155,8 +183,8 @@ class CommunityManager:
         except vk_api.AuthError as e:
             logger.error(f"Ошибка аутентификации для сообщества {community.group_id}: {e}")
             return False
-        except vk_api.exceptions.ApiError as e:
-            logger.error(f"API ошибка при регистрации сообщества {community.group_id}: {e}")
+        except ApiError as e:
+            describe_api_error(e, scope=f"register(g={community.group_id})")
             return False
         except Exception as e:
             logger.error(f"Неожиданная ошибка при регистрации сообщества {community.group_id}: {e}")
@@ -268,52 +296,68 @@ class CommunityManager:
                 }
             
             attachments = []
-            
-            # Загрузка изображения если есть
+
+            # Загрузка изображения если есть (фото публикуется на стену группы)
             if image_path:
                 from vk_api.upload import VkUpload
                 upload = VkUpload(self._vk_sessions[group_id])
-                
+
                 try:
-                    uploaded = upload.photo_wall(
+                    uploaded = with_retry(
+                        upload.photo_wall,
                         photo=image_path,
-                        group_id=group_id
+                        group_id=group_id,
+                        scope=f"photo_wall(g={group_id})",
                     )
-                    
+
                     if uploaded and len(uploaded) > 0:
                         photo = uploaded[0]
-                        owner_id = photo.get('owner_id')
+                        owner_id = photo.get('owner_id')  # для групп уже отрицательный
                         photo_id = photo.get('id')
-                        attachment = f"photo-{abs(owner_id)}_{photo_id}"
+                        attachment = f"photo{owner_id}_{photo_id}"
                         attachments.append(attachment)
+                except ApiError as e:
+                    describe_api_error(e, scope=f"photo upload g={group_id}")
+                    logger.warning(f"Не удалось загрузить фото, публикую текст: {e}")
                 except Exception as e:
                     logger.warning(f"Не удалось загрузить фото: {e}")
-            
-            # Публикация на стене
-            post_params = {
-                "owner_id": -group_id,
+
+            # Публикация на стене.
+            # owner_id для групп всегда отрицательный: -abs(group_id).
+            post_params: Dict[str, Any] = {
+                "owner_id": owner_id_for_group(group_id),
                 "message": text,
             }
-            
+
             if attachments:
                 post_params["attachments"] = ",".join(attachments)
-            
-            response = vk.wall.post(**post_params)
+
+            response = with_retry(
+                vk.wall.post,
+                scope=f"wall.post(g={group_id})",
+                **post_params,
+            )
             post_id = response.get("post_id")
-            
+
             if post_id:
                 return {
                     "success": True,
                     "post_id": post_id,
                     "group_id": group_id,
-                    "url": f"https://vk.com/wall-{group_id}_{post_id}"
+                    "url": f"https://vk.com/wall{owner_id_for_group(group_id)}_{post_id}"
                 }
             else:
                 return {
                     "success": False,
                     "error": "VK API не вернул post_id"
                 }
-                
+
+        except ApiError as e:
+            error_msg = describe_api_error(e, scope=f"publish(g={group_id})")
+            return {
+                "success": False,
+                "error": error_msg
+            }
         except Exception as e:
             logger.error(f"Ошибка публикации в сообщество {group_id}: {e}")
             return {
@@ -361,45 +405,67 @@ class CommunityManager:
     def _run_community_longpoll(self, group_id: int):
         """
         Цикл прослушивания LongPoll для конкретного сообщества.
-        
+
         Args:
-            group_id: ID группы для прослушивания.
+            group_id: ID группы для прослушивания (положительный).
         """
-        logger.info(f"Запуск LongPoll для сообщества {group_id}")
-        
+        logger.info(f"Запуск LongPoll для сообщества {group_id} (api_version={VK_API_VERSION})")
+
         while self._running and group_id in self._communities:
             try:
-                # Инициализируем LongPoll если нужно
+                # Инициализируем LongPoll если нужно.
+                # VkBotLongPoll требует ПОЛОЖИТЕЛЬНЫЙ group_id.
                 if group_id not in self._longpolls:
                     self._longpolls[group_id] = VkBotLongPoll(
                         self._vk_sessions[group_id],
-                        group_id
+                        positive_group_id(group_id),
                     )
                     logger.debug(f"LongPoll инициализирован для группы {group_id}")
-                
+
                 longpoll = self._longpolls[group_id]
-                
+
                 for event in longpoll.listen():
                     if not self._running or group_id not in self._communities:
                         break
-                    
+
                     self._process_event(group_id, event)
-                    
-            except vk_api.exceptions.LongPollError as e:
-                logger.warning(f"LongPoll ошибка для группы {group_id}: {e}. Переподключение...")
+
+            except LongPollError as e:
+                err_text = str(e)
+                if "long poll events are disabled" in err_text.lower():
+                    logger.error(
+                        f"[Группа {group_id}] LongPoll не включён в настройках сообщества! "
+                        "Включите: Управление → Настройки → Сообщения → "
+                        "«API ключ доступа и Bots Long Poll API» → Получать события — Вкл, "
+                        f"а также установите версию API не ниже {VK_API_VERSION}."
+                    )
+                else:
+                    logger.warning(
+                        f"LongPoll ошибка для группы {group_id}: {e}. Переподключение..."
+                    )
                 self._longpolls.pop(group_id, None)
                 time.sleep(5)
-            except vk_api.exceptions.ApiError as e:
-                logger.error(f"API ошибка для группы {group_id}: {e}. Переподключение...")
+            except ApiError as e:
+                describe_api_error(e, scope=f"longpoll(g={group_id})")
+                if getattr(e, "code", 0) == 15:
+                    logger.error(
+                        f"[Группа {group_id}] Access denied при запуске LongPoll. "
+                        "Проверьте, что используется СЕРВИСНЫЙ ключ этого сообщества "
+                        "с правом 'groups', и что бот включён в настройках сообщества."
+                    )
+                    # Токен точно нерабочий — переподключение бессмысленно, ждём дольше.
+                    self._longpolls.pop(group_id, None)
+                    time.sleep(30)
+                    continue
                 self._vk_sessions.pop(group_id, None)
                 self._longpolls.pop(group_id, None)
                 time.sleep(5)
             except Exception as e:
                 logger.error(f"Неожиданная ошибка в LongPoll группы {group_id}: {e}")
                 time.sleep(5)
-        
+
         logger.info(f"LongPoll для сообщества {group_id} остановлен")
-    
+
     def _process_event(self, group_id: int, event):
         """
         Обрабатывает событие от сообщества.
@@ -488,8 +554,14 @@ class CommunityManager:
             params["keyboard"] = keyboard
         
         try:
-            vk.messages.send(**params)
+            with_retry(
+                vk.messages.send,
+                scope=f"messages.send(g={group_id})",
+                **params,
+            )
             logger.debug(f"[Группа {group_id}] Сообщение отправлено peer_id={peer_id}")
+        except ApiError as e:
+            describe_api_error(e, scope=f"messages.send(g={group_id})")
         except Exception as e:
             logger.error(f"[Группа {group_id}] Ошибка отправки сообщения: {e}")
     

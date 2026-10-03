@@ -31,6 +31,7 @@ from services.content_manager_service import (
     check_and_regenerate_expiring_plan,
 )
 from managers.community_manager import CommunityManager
+from vk_errors import create_vk_session, describe_api_error, positive_group_id
 from services.scheduler import start_scheduler
 
 # Настройка логирования
@@ -566,9 +567,12 @@ async def add_user_community(
         raise HTTPException(status_code=401, detail="Пользователь не авторизован")
     logger.info(f"[communities/add] Пользователь авторизован: id={user.id}, email={user.email}")
     
-    # Проверяем токен и получаем информацию о сообществе через VK API
+    # Проверяем токен и получаем информацию о сообществе через VK API.
+    # group_id внутри системы всегда положительный (VkApi — с api_version=5.199).
+    group_id = positive_group_id(group_id)
+    token = token.strip()
     try:
-        vk_session = vk_api.VkApi(token=token)
+        vk_session = create_vk_session(token)
         vk = vk_session.get_api()
 
         # ВАЖНО (актуально для VK API 5.x): поля is_admin/admin_level объекта group

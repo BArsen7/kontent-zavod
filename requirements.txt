@@ -7,5 +7,5 @@ requests
 jinja2
 python-multipart
 apscheduler
-vk-api
+vk-api>=11.9.9
 bcrypt
