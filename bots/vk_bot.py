@@ -1,6 +1,11 @@
 """
-VK Bot для управления через сообщения сообщества.
-Использует vk_api с LongPoll для обработки входящих сообщений.
+VK Bot для управления через сообщения сообщества (legacy-модуль).
+Использует vk_api с Bots LongPoll для обработки входящих сообщений.
+
+Работает через VK API версии 5.199+ с сервисным ключом доступа сообщества
+(Community Service Token, права: wall, photos, messages, groups).
+group_id внутри системы всегда положительный; owner_id для методов
+wall/photos вычисляется как -abs(group_id).
 """
 import logging
 import time
@@ -8,12 +13,23 @@ import threading
 from typing import Optional
 
 import vk_api
+from vk_api.exceptions import ApiError
+# В vk_api >= 11.9 отдельного LongPollError нет: ошибки Bots Long Poll API
+# (в т.ч. "Long poll events are disabled") приходят как ApiError.
+LongPollError = ApiError
 from vk_api.bot_longpoll import VkBotLongPoll, VkBotEventType
 
 from config import settings
 from database import SessionLocal
 from models import Post
 from services.content_service import generate_weekly_pack
+from vk_errors import (
+    VK_API_VERSION,
+    create_vk_session,
+    describe_api_error,
+    positive_group_id,
+    with_retry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +42,12 @@ class VKBot:
         Инициализация VK бота.
 
         Args:
-            token: Токен сообщества VK API.
-            group_id: ID группы VK.
+            token: Сервисный ключ доступа сообщества VK API
+                (права: wall, photos, messages, groups).
+            group_id: ID группы VK (положительный; нормализуется через abs()).
         """
-        self.token = token
-        self.group_id = group_id
+        self.token = token.strip()
+        self.group_id: int = positive_group_id(group_id)
         self._vk_session: Optional[vk_api.VkApi] = None
         self._vk: Optional[vk_api.VkApiMethod] = None
         self._longpoll: Optional[VkBotLongPoll] = None
@@ -42,12 +59,15 @@ class VKBot:
     def vk_session(self) -> vk_api.VkApi:
         """Ленивая инициализация сессии VK."""
         if self._vk_session is None:
-            self._vk_session = vk_api.VkApi(token=self.token)
+            self._vk_session = create_vk_session(self.token)
             try:
                 self._vk_session.auth()
-                logger.debug("VK сессия успешно аутентифицирована")
+                logger.debug(f"VK сессия успешно аутентифицирована (api_version={VK_API_VERSION})")
             except vk_api.AuthError as e:
-                logger.error(f"Ошибка аутентификации VK: {e}")
+                logger.error(
+                    f"Ошибка аутентификации VK: {e}. Проверьте, что передан сервисный "
+                    "ключ доступа сообщества (Настройки → Работа с API)."
+                )
                 raise
         return self._vk_session
 
@@ -62,7 +82,8 @@ class VKBot:
     def longpoll(self) -> VkBotLongPoll:
         """Ленивая инициализация LongPoll."""
         if self._longpoll is None:
-            self._longpoll = VkBotLongPoll(self.vk_session, self.group_id)
+            # VkBotLongPoll требует ПОЛОЖИТЕЛЬНЫЙ group_id
+            self._longpoll = VkBotLongPoll(self.vk_session, positive_group_id(self.group_id))
             logger.debug("LongPoll инициализирован")
         return self._longpoll
 
@@ -88,10 +109,10 @@ class VKBot:
             # Генерируем случайный random_id
             import random
             params["random_id"] = random.randint(0, 2**31 - 1)
-            self.vk.messages.send(**params)
+            with_retry(self.vk.messages.send, scope="messages.send", **params)
             logger.debug(f"Сообщение отправлено peer_id={peer_id}: {message[:50]}...")
-        except vk_api.exceptions.ApiError as e:
-            logger.error(f"Ошибка отправки сообщения: {e}")
+        except ApiError as e:
+            describe_api_error(e, scope="messages.send")
         except Exception as e:
             logger.error(f"Неожиданная ошибка при отправке сообщения: {e}")
 
@@ -398,15 +419,32 @@ class VKBot:
                         break
                     self._process_event(event)
 
-            except vk_api.exceptions.LongPollError as e:
-                logger.warning(f"LongPoll ошибка: {e}. Переподключение через 5 секунд...")
+            except LongPollError as e:
+                err_text = str(e)
+                if "long poll events are disabled" in err_text.lower():
+                    logger.error(
+                        "LongPoll не включён в настройках сообщества! Включите: "
+                        "Управление → Настройки → Сообщения → «API ключ доступа и "
+                        "Bots Long Poll API» → Получать события — Вкл, "
+                        f"версия API — не ниже {VK_API_VERSION}."
+                    )
+                else:
+                    logger.warning(f"LongPoll ошибка: {e}. Переподключение через 5 секунд...")
                 self._longpoll = None  # Сбрасываем LongPoll для пересоздания
                 time.sleep(5)
-            except vk_api.exceptions.ApiError as e:
-                logger.error(f"VK API ошибка: {e}. Переподключение через 5 секунд...")
-                self._vk_session = None  # Сбрасываем сессию для пересоздания
-                self._longpoll = None
-                time.sleep(5)
+            except ApiError as e:
+                describe_api_error(e, scope="longpoll-loop")
+                if getattr(e, "code", 0) == 15:
+                    logger.error(
+                        "Access denied при запуске LongPoll. Проверьте, что VK_TOKEN — "
+                        "сервисный ключ ДОСТУПА СООБЩЕСТВА (не пользовательский), "
+                        "VK_GROUP_ID соответствует этому сообществу и у ключа есть право 'groups'."
+                    )
+                    time.sleep(30)  # нерабочий токен — пауза длиннее
+                else:
+                    self._vk_session = None  # Сбрасываем сессию для пересоздания
+                    self._longpoll = None
+                    time.sleep(5)
             except Exception as e:
                 logger.error(f"Неожиданная ошибка в цикле LongPoll: {e}. Переподключение через 5 секунд...")
                 self._vk_session = None
