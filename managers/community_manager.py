@@ -131,9 +131,10 @@ class CommunityManager:
             # Ответ может быть list ([{...}]) или dict ({"items": [...]}),
             # поэтому нормализуем его перед обращением к первому элементу.
             vk = vk_session.get_api()
+            # VK API 5.199: параметр group_ids — строка через запятую, ПОЛОЖИТЕЛЬНЫЙ id.
             result = with_retry(
                 vk.groups.getById,
-                group_ids=[community.group_id],
+                group_ids=str(abs(int(community.group_id))),
                 scope=f"groups.getById(g={community.group_id})",
             )
             if isinstance(result, dict):

@@ -575,23 +575,16 @@ async def add_user_community(
         vk_session = create_vk_session(token)
         vk = vk_session.get_api()
 
-        # ВАЖНО (актуально для VK API 5.x): поля is_admin/admin_level объекта group
-        # возвращаются только при вызове ОТ ИМЕНИ ПОЛЬЗОВАТЕЛЯ (user token со scope=groups).
-        # Ключ доступа СООБЩЕСТВА (vk1.a....) не «знает», кто его создал, поэтому
-        # groups.getById с таким токеном всегда возвращает is_admin=0 — на прошлом шаге
-        # это давало ложное 403 "нет прав администратора".
-        #
-        # Для ключа сообщества правильный способ проверить права — метод
-        # groups.getByID с параметром min_admin_level (доступен только community token):
-        # вернутся только те сообщества, где создатель токена имеет админа не ниже
-        # указанного уровня (1 — модератор, 2 — редактор, 3 — администратор).
-        # Если список пуст — прав нет; если ошибка [15] — это user-токен, и тогда
-        # используем is_admin из getById.
-        #
-        # ВНИМАНИЕ: в зависимости от версии vk_api/ответа VK API метод getById может
-        # вернуть как list ([{...}]), так и dict ({"items": [...], "count": N}).
-        # Обращение по индексу [0] без проверки типа приводило к KeyError: 0.
-        result = vk.groups.getById(group_ids=[group_id])
+        # ВАЖНО (VK API 5.199): метод groups.getById принимает параметр group_ids
+        # (строка со значениями через запятую), а НЕ group_id. Значение должно быть
+        # ПОЛОЖИТЕЛЬНЫМ числом (без минуса). Метод требует scope `groups` у токена.
+        # Ответ нормализуем: в зависимости от версии vk_api это может быть list
+        # ([{...}]) или dict ({"items": [...], "count": N}).
+        logger.info(
+            f"[communities/add] Вызов groups.getById: group_ids='{abs(int(group_id))}', "
+            f"token_mask='{token[:5]}***' (api_version=5.199)"
+        )
+        result = vk.groups.getById(group_ids=str(abs(int(group_id))))
         if isinstance(result, dict):
             items = result.get("items", []) or []
         elif isinstance(result, list):
@@ -600,79 +593,50 @@ async def add_user_community(
             items = []
         if not items:
             logger.warning(
-                f"[communities/add] groups.getById вернул пустой ответ для группы "
-                f"{group_id} (сообщество не найдено или токен не имеет к нему доступа)"
+                f"[communities/add] groups.getById вернул пустой ответ [] для группы "
+                f"{group_id}. Возможные причины: 1) у токена отсутствует право 'groups'; "
+                f"2) ID сообщества указан неверно; 3) токен отозван или создан для другого "
+                f"сообщества (token_mask='{token[:5]}***')."
             )
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Сообщество с ID {group_id} не найдено, либо токен не имеет к нему "
-                    "доступа. Проверьте числовой ID сообщества и что ключ создан именно "
-                    "для этого сообщества."
+                    "Не удалось проверить сообщество. Убедитесь, что: "
+                    "1) Токен имеет право 'groups', "
+                    "2) ID сообщества указан верно, "
+                    "3) Вы являетесь администратором этого сообщества."
                 )
             )
         group_info = items[0]
         group_name = group_info.get("name", f"Группа {group_id}")
         logger.info(
-            f"[communities/add] groups.getById: name='{group_name}', "
-            f"is_admin={group_info.get('is_admin', 0)} (0=нет, 1=админ, 2=супер-админ)"
+            f"[communities/add] groups.getById OK: id={group_info.get('id')}, "
+            f"name='{group_name}'"
         )
 
-        admin_confirmed = False
+        # Права администратора для сервисного ключа сообщества подтверждаются
+        # доступностью getLongPollServer (требует права manage): этот вызов
+        # возможен только ключом администратора данного сообщества. Поле is_admin
+        # с community-токеном всегда 0 и непригодно для проверки.
         try:
-            # Проверяем право manage — оно необходимо боту (long poll, публикация от имени группы).
-            # Вызов с min_admin_level=3 работает ТОЛЬКО с ключом сообщества.
-            res = vk.groups.getByID(group_ids=[group_id], min_admin_level=3)
-            items = res.get("items", []) if isinstance(res, dict) else []
-            admin_confirmed = bool(items) and items[0].get("id") == int(group_id)
-            logger.info(
-                f"[communities/add] groups.getByID(min_admin_level=3) → items={items} "
-                f"(ключ сообщества: права подтверждены, если id совпадает)"
+            vk.groups.getLongPollServer(group_id=group_id)
+        except vk_api.exceptions.ApiError as lps_err:
+            logger.warning(
+                f"[communities/add] getLongPollServer не прошёл для группы {group_id}: {lps_err} "
+                f"(у токена нет права manage / это не ключ данного сообщества)"
             )
-        except vk_api.exceptions.ApiError as e:
-            if getattr(e, "code", None) == 15:
-                # Это пользовательский токен — смотрим is_admin в ответе getById
-                admin_level = group_info.get("is_admin", 0)
-                admin_confirmed = bool(admin_level)
-                logger.info(
-                    f"[communities/add] min_admin_level недоступен (user-токен), "
-                    f"is_admin={admin_level} (1=да, 0=нет)"
-                )
-            else:
-                logger.warning(f"[communities/add] groups.getByID(min_admin_level): {e}")
-
-        if not admin_confirmed:
             raise HTTPException(
                 status_code=403,
                 detail=(
                     f"Не удалось подтвердить права администратора в сообществе «{group_name}». "
                     "Используйте КЛЮЧ ДОСТУПА СООБЩЕСТВА, созданный администратором этого "
                     "сообщества: Сообщество → Управление → Работа с API → Ключи доступа → "
-                    "«Создать ключ» (права: manage, wall, photos, messages), тип: "
-                    "«Ключ сообщества». Пользовательские токены также поддерживаются, но "
-                    "требуют разрешения «Данные сообществ» (scope groups)."
+                    "«Создать ключ» (обязательные права: groups, manage, wall, photos, "
+                    "messages), тип: «Ключ сообщества»."
                 )
             )
 
-        # Дополнительно проверяем возможность управлять сообществом (нужно для бота):
-        # getLongPollServer доступен только при праве manage у токена.
-        try:
-            vk.groups.getLongPollServer(group_id=group_id)
-        except vk_api.exceptions.ApiError as lps_err:
-            logger.warning(
-                f"[communities/add] getLongPollServer не прошёл для группы {group_id}: {lps_err} "
-                f"(скорее всего, у токена нет права manage)"
-            )
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Токен не имеет права «manage» (управление сообществом). "
-                    "Создайте новый ключ доступа с максимальными правами: "
-                    "Сообщество → Управление → Работа с API → Ключи доступа."
-                )
-            )
-
-        logger.info(f"[communities/add] VK API: группа {group_name} ({group_id}), права администратора подтверждены")
+        logger.info(f"[communities/add] VK API: группа {group_name} ({group_id}), права подтверждены (getLongPollServer OK)")
 
     except HTTPException:
         # Уже сформированная ошибка (например 403 "нет прав") — пробрасываем как есть
