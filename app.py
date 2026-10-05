@@ -8,6 +8,8 @@ import secrets
 import vk_api
 import bcrypt as _bcrypt
 
+from sqlalchemy import func as sa_func
+
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Form
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -185,6 +187,109 @@ def get_current_admin(request: Request, db: Session = Depends(get_db)) -> User:
             detail="Доступ запрещен. Требуются права администратора.",
         )
     return user
+
+
+# --- Admin Panel Routes (Часть 2: backend-логика панели администратора) ---
+# Все роуты ниже защищены зависимостью Depends(get_current_admin).
+# Шаблоны admin_*.html будут созданы в Части 3; backend готов и работает уже сейчас.
+
+@app.get("/admin")
+async def admin_dashboard(
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Панель администратора: сводная статистика."""
+    total_users = db.query(sa_func.count(User.id)).scalar() or 0
+    total_communities = db.query(sa_func.count(UserCommunity.id)).scalar() or 0
+    total_posts = db.query(sa_func.count(Post.id)).scalar() or 0
+    logger.info(
+        f"[admin] {admin.email}: открыл дашборд "
+        f"(users={total_users}, communities={total_communities}, posts={total_posts})"
+    )
+    return templates.TemplateResponse(
+        request=request,
+        name="admin_dashboard.html",
+        context={
+            "user": admin,
+            "admin": admin,
+            "stats": {
+                "total_users": total_users,
+                "total_communities": total_communities,
+                "total_posts": total_posts,
+            },
+        },
+    )
+
+
+@app.get("/admin/users")
+async def admin_users_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Панель администратора: список всех пользователей."""
+    users = db.query(User).order_by(User.id.asc()).all()
+    logger.info(f"[admin] {admin.email}: открыл список пользователей (count={len(users)})")
+    return templates.TemplateResponse(
+        request=request,
+        name="admin_users.html",
+        context={"user": admin, "admin": admin, "users": users},
+    )
+
+
+@app.post("/admin/users/{user_id}/toggle_admin")
+async def admin_toggle_user_admin(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Переключает право is_admin у пользователя и возвращает на /admin/users."""
+    target_user = db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        logger.warning(f"[admin] {admin.email}: пользователь id={user_id} не найден (toggle_admin)")
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    target_user.is_admin = not target_user.is_admin
+    db.commit()
+    db.refresh(target_user)
+    logger.info(
+        f"[admin] {admin.email}: изменил права пользователя id={target_user.id} "
+        f"({target_user.email}): is_admin={target_user.is_admin}"
+    )
+    return RedirectResponse(url="/admin/users", status_code=302)
+
+
+@app.get("/admin/communities")
+async def admin_communities_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Панель администратора: все сообщества с JOIN владельцев (UserCommunity + User)."""
+    rows = (
+        db.query(UserCommunity, User)
+        .join(User, UserCommunity.user_id == User.id)
+        .order_by(UserCommunity.id.asc())
+        .all()
+    )
+    communities = [
+        {
+            "group_id": uc.group_id,
+            "group_name": uc.group_name or f"Группа {uc.group_id}",
+            "owner_email": owner.email,
+            "created_at": uc.created_at,
+        }
+        for uc, owner in rows
+    ]
+    logger.info(
+        f"[admin] {admin.email}: открыл список сообществ (count={len(communities)})"
+    )
+    return templates.TemplateResponse(
+        request=request,
+        name="admin_communities.html",
+        context={"user": admin, "admin": admin, "communities": communities},
+    )
 
 
 # --- Web Routes ---
