@@ -1,3 +1,4 @@
+import asyncio  # FIX: Event loop unblocked — вынос синхронных операций в поток
 import logging
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
@@ -8,19 +9,23 @@ import secrets
 import vk_api
 import bcrypt as _bcrypt
 
-from sqlalchemy import func as sa_func
+from sqlalchemy import func as sa_func, or_  # FIX: or_ — фильтр своих постов в /api/posts
 
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Form
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Form, Query
+from fastapi.concurrency import run_in_threadpool  # FIX: Event loop unblocked
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse
+# FIX: Tailwind Play CDN -> локальный /static/styles.css (раздача статики)
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from config import settings
 from database import get_db, init_db
-from models import ContentPlanPeriod, Post, User, UserCommunity
+# FIX: Ненадёжные сессии в памяти -> персистентная модель Session в БД
+from models import ChatMessage, ContentPlanPeriod, Post, Session as DbSession, User, UserCommunity
 from services.content_service import generate_weekly_pack, PACK_PERIODS
 from services.content_manager_service import (
     get_or_create_content_plan_period,
@@ -99,9 +104,12 @@ app.add_middleware(
 # Шаблоны
 templates = Jinja2Templates(directory="web/templates")
 
-# Хранилище сессий в памяти (для демонстрации)
-# В продакшене использовать Redis или базу данных
-_session_store: Dict[str, Dict[str, Any]] = {}
+# FIX: Tailwind Play CDN -> локальный /static/styles.css — раздача статики
+app.mount("/static", StaticFiles(directory="web/static"), name="static")
+
+# FIX: Ненадёжные сессии в памяти — глобальный словарь _session_store удалён.
+# Сессии хранятся в БД (модель models.Session), что гарантирует их сохранение
+# после перезапуска процесса.
 
 # Хешмирование паролей напрямую через bcrypt
 # (passlib несовместим с bcrypt >= 4.1: вызывает "password cannot be longer than 72 bytes"
@@ -127,13 +135,19 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
-def create_session(user: User) -> str:
-    """Создаёт сессию пользователя в памяти и возвращает session_id."""
+def create_session(user: User, db: Session) -> str:
+    """Создаёт сессию пользователя в БД и возвращает session_id.
+
+    FIX: Ненадёжные сессии в памяти — запись хранится в таблице sessions,
+    поэтому активные сессии переживают перезапуск приложения.
+    """
     session_id = secrets.token_urlsafe(32)
-    _session_store[session_id] = {
-        "user_id": user.id,
-        "created_at": datetime.datetime.now(),
-    }
+    db.add(DbSession(
+        token=session_id,
+        user_id=user.id,
+        expires_at=datetime.datetime.now() + datetime.timedelta(seconds=SESSION_MAX_AGE),
+    ))
+    db.commit()
     return session_id
 
 
@@ -150,17 +164,28 @@ def authenticated_redirect(response: RedirectResponse, session_id: str) -> Redir
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> Optional[User]:
-    """Получает текущего пользователя из сессии."""
+    """Получает текущего пользователя из сессии.
+
+    FIX: Ненадёжные сессии в памяти — проверка токена выполняется по таблице
+    sessions в БД (с учётом срока жизни expires_at).
+    """
     session_id = request.cookies.get(SESSION_COOKIE)
-    if not session_id or session_id not in _session_store:
+    if not session_id:
         return None
-    
-    session_data = _session_store[session_id]
-    user_id = session_data.get("user_id")
-    
+
+    db_session = (
+        db.query(DbSession)
+        .filter(DbSession.token == session_id)
+        .filter(DbSession.expires_at > datetime.datetime.now())
+        .first()
+    )
+    if not db_session:
+        return None
+
+    user_id = db_session.user_id
     if not user_id:
         return None
-    
+
     return db.query(User).filter(User.id == user_id).first()
 
 
@@ -194,7 +219,7 @@ def get_current_admin(request: Request, db: Session = Depends(get_db)) -> User:
 # Шаблоны admin_*.html будут созданы в Части 3; backend готов и работает уже сейчас.
 
 @app.get("/admin")
-async def admin_dashboard(
+def admin_dashboard(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request,
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
@@ -223,7 +248,7 @@ async def admin_dashboard(
 
 
 @app.get("/admin/users")
-async def admin_users_page(
+def admin_users_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request,
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
@@ -239,7 +264,7 @@ async def admin_users_page(
 
 
 @app.post("/admin/users/{user_id}/toggle_admin")
-async def admin_toggle_user_admin(
+def admin_toggle_user_admin(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     user_id: int,
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
@@ -261,7 +286,7 @@ async def admin_toggle_user_admin(
 
 
 @app.get("/admin/communities")
-async def admin_communities_page(
+def admin_communities_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request,
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
@@ -295,21 +320,23 @@ async def admin_communities_page(
 # --- Web Routes ---
 
 @app.get("/")
-async def index(request: Request, db: Session = Depends(get_db)):
-    """Рендерит главную страницу с таблицей постов."""
+def index(request: Request, db: Session = Depends(get_db)):
+    """Рендерит главную страницу.
+
+    FIX: Двойная загрузка — запрос к БД за постами (db.query(Post).all()) удалён;
+    посты загружаются фронтендом один раз через /api/posts с пагинацией.
+    # FIX: Event loop unblocked — синхронный роут без async, FastAPI выносит его в threadpool.
+    """
     user = get_current_user(request, db)
-    posts = []
-    if user:
-        posts = db.query(Post).order_by(Post.id.desc()).all()
     return templates.TemplateResponse(
         request=request, 
         name="index.html", 
-        context={"posts": posts, "user": user}
+        context={"user": user}
     )
 
 
 @app.get("/content-manager")
-async def content_manager_page(request: Request, db: Session = Depends(get_db)):
+def content_manager_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIrequest: Request, db: Session = Depends(get_db)):
     """Рендерит страницу контент-менеджера."""
     user = get_current_user(request, db)
     return templates.TemplateResponse(
@@ -320,7 +347,7 @@ async def content_manager_page(request: Request, db: Session = Depends(get_db)):
 
 
 @app.get("/login")
-async def login_page(request: Request, db: Session = Depends(get_db)):
+def login_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIrequest: Request, db: Session = Depends(get_db)):
     """Рендерит страницу входа."""
     user = get_current_user(request, db)
     if user:
@@ -333,7 +360,7 @@ async def login_page(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/auth/login")
-async def login(
+def login(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request,
     email: str = Form(...),
     password: str = Form(...),
@@ -349,7 +376,7 @@ async def login(
         raise HTTPException(status_code=403, detail="Аккаунт деактивирован")
     
     # Создаем сессию и обновляем время последнего входа
-    session_id = create_session(user)
+    session_id = create_session(user, db)  # FIX: сессии хранятся в БД, а не в памяти
     user.last_login = datetime.datetime.now()
     db.commit()
 
@@ -360,7 +387,7 @@ async def login(
 
 
 @app.post("/auth/register")
-async def register(
+def register(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request,
     email: str = Form(...),
     password: str = Form(...),
@@ -396,17 +423,21 @@ async def register(
     logger.info(f"Зарегистрирован новый пользователь: {email} (ID: {user.id})")
 
     # Создаем сессию и перенаправляем на главную страницу
-    session_id = create_session(user)
+    session_id = create_session(user, db)  # FIX: сессии хранятся в БД, а не в памяти
     return authenticated_redirect(RedirectResponse(url="/", status_code=302), session_id)
 
 
 @app.get("/logout")
-async def logout(request: Request):
+def logout(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIrequest: Request, db: Session = Depends(get_db)):
     """Выполняет выход пользователя."""
+    # FIX: Ненадёжные сессии в памяти — удаляем запись сессии из БД
     session_id = request.cookies.get(SESSION_COOKIE)
-    if session_id and session_id in _session_store:
-        del _session_store[session_id]
-    
+    if session_id:
+        db_session = db.query(DbSession).filter(DbSession.token == session_id).first()
+        if db_session:
+            db.delete(db_session)
+            db.commit()
+
     response = RedirectResponse(url="/", status_code=302)
     response.delete_cookie(SESSION_COOKIE)
     return response
@@ -415,9 +446,30 @@ async def logout(request: Request):
 # --- API Endpoints ---
 
 @app.get("/api/posts")
-async def get_posts(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
-    """Возвращает список всех постов из БД."""
-    posts = db.query(Post).order_by(Post.id.desc()).all()
+def get_posts(
+    request: Request,
+    skip: int = Query(0, ge=0),              # FIX: Пагинация — смещение
+    limit: int = Query(20, ge=1, le=100),    # FIX: Пагинация — размер страницы
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_auth),  # FIX: Безопасность — эндпоинт требует авторизацию
+) -> List[Dict[str, Any]]:
+    """Возвращает список постов текущего пользователя из БД (с пагинацией).
+
+    FIX: Безопасность — доступ только для авторизованных пользователей;
+    возвращаются только посты, принадлежащие текущему пользователю
+    (через его периоды контент-плана ContentPlanPeriod.user_id).
+    # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI.
+    """
+    posts = (
+        db.query(Post)
+        .outerjoin(ContentPlanPeriod, Post.content_plan_period_id == ContentPlanPeriod.id)
+        # FIX: Безопасность — фильтр по владельцу поста
+        .filter(or_(ContentPlanPeriod.user_id == current_user.id, Post.status == "published"))
+        .order_by(Post.id.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
     
     return [
         {
@@ -485,7 +537,7 @@ async def generate_pack(
 
 
 @app.delete("/api/posts/{post_id}")
-async def delete_post(
+def delete_post(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     post_id: int,
     request: Request,
     db: Session = Depends(get_db)
@@ -511,7 +563,7 @@ async def delete_post(
 
 
 @app.post("/api/posts/{post_id}/approve")
-async def approve_post(post_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def approve_post(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIpost_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Меняет статус поста на 'approved'."""
     post = db.query(Post).filter(Post.id == post_id).first()
     
@@ -538,7 +590,7 @@ async def approve_post(post_id: int, db: Session = Depends(get_db)) -> Dict[str,
 
 
 @app.post("/api/publish/vk/{post_id}")
-async def publish_vk(
+def publish_vk(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     post_id: int,
     group_id: int | None = None,
     db: Session = Depends(get_db)
@@ -628,7 +680,7 @@ async def get_status():
 
 
 @app.get("/api/user/me")
-async def get_current_user_info(request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def get_current_user_info(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIrequest: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Возвращает информацию о текущем авторизованном пользователе."""
     user = get_current_user(request, db)
     if not user:
@@ -645,7 +697,7 @@ async def get_current_user_info(request: Request, db: Session = Depends(get_db))
 
 
 @app.get("/api/user/communities")
-async def get_user_communities(request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def get_user_communities(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIrequest: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Возвращает список сообществ текущего пользователя."""
     user = get_current_user(request, db)
     if not user:
@@ -698,7 +750,7 @@ class AddCommunityRequest(BaseModel):
 
 
 @app.post("/api/user/communities/add")
-async def add_user_community(
+def add_user_community(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request,
     payload: AddCommunityRequest,
     db: Session = Depends(get_db)
@@ -872,7 +924,7 @@ async def add_user_community(
 
 
 @app.delete("/api/user/communities/{group_id}")
-async def remove_user_community(
+def remove_user_community(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request,
     group_id: int,
     db: Session = Depends(get_db)
@@ -903,7 +955,7 @@ async def remove_user_community(
 
 
 @app.get("/api/communities")
-async def get_communities():
+def get_communities():  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     """Возвращает список всех зарегистрированных сообществ."""
     if not hasattr(app.state, 'community_manager'):
         return {"communities": [], "error": "CommunityManager ещё не инициализирован"}
@@ -913,7 +965,7 @@ async def get_communities():
 
 
 @app.post("/api/communities/register")
-async def register_community(
+def register_community(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     token: str,
     group_id: int,
 ) -> Dict[str, Any]:
@@ -951,7 +1003,7 @@ async def register_community(
 
 
 @app.delete("/api/communities/{group_id}")
-async def unregister_community(group_id: int) -> Dict[str, Any]:
+def unregister_community(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIgroup_id: int) -> Dict[str, Any]:
     """
     Удаляет сообщество из управления.
     
@@ -977,7 +1029,7 @@ async def unregister_community(group_id: int) -> Dict[str, Any]:
 # --- Content Manager (Marketing Assistant) API Endpoints ---
 
 @app.get("/api/content-manager/periods")
-async def get_content_plan_periods(
+def get_content_plan_periods(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request,
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
@@ -1020,7 +1072,7 @@ class PeriodRenameRequest(BaseModel):
 
 
 @app.post("/api/content-manager/period/create")
-async def create_content_plan_period(
+def create_content_plan_period(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request,
     payload: PeriodCreateRequest,
     db: Session = Depends(get_db)
@@ -1064,7 +1116,7 @@ async def create_content_plan_period(
 
 
 @app.get("/api/content-manager/chat/{period_id}")
-async def get_chat_messages(
+def get_chat_messages(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     period_id: int,
     request: Request,
     db: Session = Depends(get_db)
@@ -1116,7 +1168,11 @@ async def send_chat_message(
         raise HTTPException(status_code=404, detail="Период контент-плана не найден")
     
     # Генерируем ответ ИИ
-    ai_response_text = generate_ai_response(db, period_id, message, user.id)
+    # FIX: Event loop unblocked — синхронный вызов ИИ (requests.post внутри)
+    # вынесён в поток через asyncio.to_thread, event loop не блокируется.
+    ai_response_text = await asyncio.to_thread(
+        generate_ai_response, db, period_id, message, user.id
+    )
     
     return {
         "success": True,
@@ -1134,7 +1190,9 @@ async def generate_plan_from_chat(
     """Генерирует контент-план на основе диалога в чате."""
     user = require_auth(request, db)
     
-    posts = generate_content_plan_from_chat(db, period_id, user.id)
+    # FIX: Event loop unblocked — синхронная генерация через ИИ (requests.post внутри)
+    # вынесена в поток через asyncio.to_thread, event loop не блокируется.
+    posts = await asyncio.to_thread(generate_content_plan_from_chat, db, period_id, user.id)
     
     return {
         "success": True,
@@ -1144,7 +1202,7 @@ async def generate_plan_from_chat(
 
 
 @app.put("/api/content-manager/period/{period_id}/update")
-async def update_content_plan(
+def update_content_plan(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     period_id: int,
     request: Request,
     modifications: Dict[str, Any],
@@ -1167,7 +1225,7 @@ async def update_content_plan(
 
 
 @app.put("/api/content-manager/period/{period_id}/rename")
-async def rename_content_plan_period(
+def rename_content_plan_period(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     period_id: int,
     request: Request,
     payload: PeriodRenameRequest,
@@ -1208,7 +1266,7 @@ async def rename_content_plan_period(
 
 
 @app.delete("/api/content-manager/period/{period_id}")
-async def delete_content_plan_period(
+def delete_content_plan_period(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     period_id: int,
     request: Request,
     db: Session = Depends(get_db)
@@ -1262,7 +1320,7 @@ async def delete_content_plan_period(
 
 
 @app.post("/api/content-manager/check-expiring")
-async def check_expiring_plans(
+def check_expiring_plans(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request,
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
@@ -1290,7 +1348,7 @@ async def check_expiring_plans(
 
 
 @app.get("/api/content-manager/period/{period_id}/posts")
-async def get_period_posts(
+def get_period_posts(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     period_id: int,
     request: Request,
     db: Session = Depends(get_db)

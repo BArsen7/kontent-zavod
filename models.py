@@ -28,6 +28,24 @@ class User(Base):
     )
 
 
+class Session(Base):
+    """Модель сессии пользователя.
+
+    FIX: Ненадёжные сессии в памяти — храним сессии в БД (token, user_id,
+    expires_at), что гарантирует их сохранение после перезапуска приложения.
+    """
+
+    __tablename__ = "sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    token: Mapped[str] = mapped_column(String(128), nullable=False, unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+
+    user: Mapped["User"] = relationship("User", backref="sessions")
+
+
 class UserCommunity(Base):
     """Модель связи пользователя с сообществами (права доступа)."""
 
