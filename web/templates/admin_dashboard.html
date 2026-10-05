@@ -1,0 +1,50 @@
+{% extends "admin_base.html" %}
+
+{% block title %}Дашборд — Админ-панель{% endblock %}
+
+{% block content %}
+<h1 class="text-3xl font-bold text-gray-800 mb-6">📊 Дашборд</h1>
+
+<div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+    <!-- Карточка: пользователи -->
+    <div class="bg-white rounded-lg shadow p-4 flex items-center space-x-4">
+        <div class="text-4xl">👥</div>
+        <div>
+            <p class="text-sm text-gray-500">Пользователи</p>
+            <p class="text-2xl font-bold text-gray-800">{{ stats.total_users }}</p>
+        </div>
+    </div>
+
+    <!-- Карточка: сообщества -->
+    <div class="bg-white rounded-lg shadow p-4 flex items-center space-x-4">
+        <div class="text-4xl">🌐</div>
+        <div>
+            <p class="text-sm text-gray-500">Сообщества</p>
+            <p class="text-2xl font-bold text-gray-800">{{ stats.total_communities }}</p>
+        </div>
+    </div>
+
+    <!-- Карточка: посты -->
+    <div class="bg-white rounded-lg shadow p-4 flex items-center space-x-4">
+        <div class="text-4xl">📝</div>
+        <div>
+            <p class="text-sm text-gray-500">Посты</p>
+            <p class="text-2xl font-bold text-gray-800">{{ stats.total_posts }}</p>
+        </div>
+    </div>
+</div>
+
+<div class="mt-8 bg-white rounded-lg shadow p-6">
+    <h2 class="text-lg font-semibold text-gray-800 mb-2">Быстрые ссылки</h2>
+    <div class="flex flex-col sm:flex-row gap-4">
+        <a href="/admin/users"
+           class="inline-flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-lg shadow transition duration-200 whitespace-nowrap">
+            👥 Управление пользователями
+        </a>
+        <a href="/admin/communities"
+           class="inline-flex items-center justify-center bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-6 rounded-lg shadow transition duration-200 whitespace-nowrap">
+            🌐 Все сообщества
+        </a>
+    </div>
+</div>
+{% endblock %}
