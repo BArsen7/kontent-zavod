@@ -1,0 +1,61 @@
+{% extends "admin_base.html" %}
+
+{% block title %}Пользователи — Админ-панель{% endblock %}
+
+{% block content %}
+<h1 class="text-3xl font-bold text-gray-800 mb-6">👥 Пользователи</h1>
+
+<div class="bg-white rounded-lg shadow overflow-hidden">
+    <table class="min-w-full divide-y divide-gray-200">
+        <thead class="bg-gray-50">
+            <tr>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Админ?</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Дата регистрации</th>
+                <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
+            </tr>
+        </thead>
+        <tbody class="bg-white divide-y divide-gray-200">
+            {% for user in users %}
+            <tr class="hover:bg-gray-50 transition duration-150">
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ user.id }}</td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-800">{{ user.email }}</td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{{ user.first_name or "—" }}</td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                    {% if user.is_admin %}
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">Да</span>
+                    {% else %}
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-600">Нет</span>
+                    {% endif %}
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    {{ user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else "—" }}
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-right text-sm">
+                    <form method="POST" action="/admin/users/{{ user.id }}/toggle_admin" class="inline"
+                          onsubmit="return confirm('Переключить права администратора для {{ user.email }}?');">
+                        {% if user.is_admin %}
+                            <button type="submit"
+                                    class="bg-gray-400 hover:bg-gray-500 text-white font-semibold py-1 px-4 rounded-md transition duration-200">
+                                Снять админа
+                            </button>
+                        {% else %}
+                            <button type="submit"
+                                    class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-1 px-4 rounded-md transition duration-200">
+                                Сделать админом
+                            </button>
+                        {% endif %}
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="6" class="px-6 py-8 text-center text-sm text-gray-500">Пользователей нет.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
