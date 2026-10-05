@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Autopilot Content - Панель управления</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FIX: Tailwind Play CDN заменён на локальный styles.css -->
+    <link rel="stylesheet" href="/static/styles.css">
     <style>
         .loader {
             border-top-color: #3498db;
@@ -147,6 +148,9 @@
         let currentUser = null;
         let userCommunities = [];
         let currentGroupId = null;
+        // FIX: Пагинация /api/posts
+        let postsSkip = 0;
+        const postsLimit = 20;
 
         // Утилиты
         function showToast(message, isError = false) {
@@ -187,21 +191,47 @@
             return `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${colors[type] || 'bg-gray-100 text-gray-800'}">${badges[type] || type}</span>`;
         }
 
-        // Загрузка постов
-        async function loadPosts() {
+        // Функции авторизации и управления сообществами
+        async function fetchUser() {
+            const response = await fetch(`${API_BASE}/api/user/me`);
+            if (response.ok) return await response.json();
+            return null;
+        }
+
+        async function fetchPosts() {
             try {
-                const response = await fetch(`${API_BASE}/api/posts`);
+                // FIX: Пагинация — серверная раздача страниц (skip/limit)
+                const response = await fetch(`${API_BASE}/api/posts?skip=${postsSkip}&limit=${postsLimit}`);
                 if (!response.ok) throw new Error('Ошибка загрузки');
-                const posts = await response.json();
-                
-                renderPosts(posts);
-                updateStats(posts);
+                return await response.json();
             } catch (error) {
                 console.error('Ошибка:', error);
                 document.getElementById('postsTableBody').innerHTML = `
                     <tr><td colspan="7" class="px-6 py-4 text-center text-red-500">Ошибка загрузки постов</td></tr>
                 `;
+                return null;
             }
+        }
+
+        async function fetchUserCommunities() {
+            try {
+                const response = await fetch(`${API_BASE}/api/user/communities`);
+                if (response.ok) {
+                    const data = await response.json();
+                    return data.communities || [];
+                }
+            } catch (error) {
+                console.error('Ошибка загрузки сообществ:', error);
+            }
+            return [];
+        }
+
+        // Загрузка постами (обновление таблицы после действий)
+        async function loadPosts() {
+            const posts = await fetchPosts();
+            if (posts === null) return; // ошибка уже отрендерена в fetchPosts
+            renderPosts(posts);
+            updateStats(posts);
         }
 
         function renderPosts(posts) {
@@ -306,23 +336,33 @@
             }
         }
 
-        // Функции авторизации и управления сообществами
-        async function loadUserInfo() {
+        // FIX: Каскадные (waterfall) запросы — первичная проверка авторизации,
+        // затем юзер + комьюнити + посты запрашиваются параллельно через Promise.all()
+        async function initApp() {
+            let user = null;
             try {
-                const response = await fetch(`${API_BASE}/api/user/me`);
-                if (response.ok) {
-                    const user = await response.json();
-                    currentUser = user;
-                    renderAuthBlock();
-                    await loadUserCommunities();
-                } else {
-                    currentUser = null;
-                    renderAuthBlock();
-                }
+                user = await fetchUser();  // первичная проверка авторизации
             } catch (error) {
-                console.error('Ошибка загрузки информации о пользователе:', error);
-                currentUser = null;
-                renderAuthBlock();
+                console.error('Ошибка проверки авторизации:', error);
+                user = null;
+            }
+            currentUser = user;
+            renderAuthBlock();
+
+            if (!currentUser) return; // неавторизованным данные не нужны
+
+            const [posts, communities] = await Promise.all([
+                fetchPosts(),
+                fetchUserCommunities(),
+            ]);
+
+            userCommunities = communities;
+            renderCommunitySelector();
+            checkAccess();
+
+            if (posts !== null) {
+                renderPosts(posts);
+                updateStats(posts);
             }
         }
 
@@ -337,8 +377,7 @@
                         <a href="/logout" class="text-sm text-red-600 hover:text-red-800">Выйти</a>
                     </div>
                 `;
-                // Загружаем посты только после авторизации
-                loadPosts();
+                // FIX: посты загружаются параллельно в initApp() через Promise.all()
             } else {
                 authBlock.innerHTML = `
                     <a href="/login" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold py-2 px-4 rounded-md shadow transition duration-200 flex items-center">
@@ -357,22 +396,10 @@
         }
 
         async function loadUserCommunities() {
-            try {
-                const response = await fetch(`${API_BASE}/api/user/communities`);
-                if (response.ok) {
-                    const data = await response.json();
-                    userCommunities = data.communities || [];
-                    renderCommunitySelector();
-                    checkAccess();
-                } else {
-                    userCommunities = [];
-                    renderCommunitySelector();
-                }
-            } catch (error) {
-                console.error('Ошибка загрузки сообществ:', error);
-                userCommunities = [];
-                renderCommunitySelector();
-            }
+            // FIX: переиспользуем fetchUserCommunities (без дублирования логики)
+            userCommunities = await fetchUserCommunities();
+            renderCommunitySelector();
+            checkAccess();
         }
 
         function renderCommunitySelector() {
@@ -480,8 +507,7 @@
 
         // Инициализация
         document.addEventListener('DOMContentLoaded', () => {
-            loadUserInfo();
-            // Посты не загружаем до авторизации
+            initApp();  // FIX: параллельная загрузка данных вместо каскада await
         });
     </script>
 </body>
