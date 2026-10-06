@@ -16,6 +16,16 @@
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+        /* FIX (UI): тост был статично невидим (opacity-0 + translate-y-20 в разметке),
+           а JS-классы для его показа в локальном styles.css отсутствовали — уведомления
+           вообще не появлялись. Теперь показ/скрытие управляются классом .toast-show. */
+        #toast {
+            transition: opacity .3s ease, transform .3s ease;
+        }
+        #toast.toast-show {
+            opacity: 1;
+            transform: translateY(0);
+        }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -157,11 +167,15 @@
             const toast = document.getElementById('toast');
             const toastMsg = document.getElementById('toastMessage');
             toastMsg.textContent = message;
-            toast.classList.remove(isError ? 'bg-gray-800' : 'bg-green-600');
+            // FIX (UI): корректное переключение цветов вместо remove/add несуществующих
+            // комбинаций — к тосту могли «наклеиться» сразу несколько фонов.
+            toast.classList.remove('bg-gray-800', 'bg-green-600', 'bg-red-600');
             toast.classList.add(isError ? 'bg-red-600' : 'bg-green-600');
-            toast.classList.remove('translate-y-20', 'opacity-0');
-            setTimeout(() => {
-                toast.classList.add('translate-y-20', 'opacity-0');
+            // FIX (UI): показ через класс .toast-show (opacity/transform).
+            toast.classList.add('toast-show');
+            clearTimeout(showToast._timer);
+            showToast._timer = setTimeout(() => {
+                toast.classList.remove('toast-show');
             }, 3000);
         }
 
@@ -438,13 +452,18 @@
         }
 
         function showAddTokenModal() {
-            document.getElementById('addTokenModal').classList.remove('hidden');
-            document.getElementById('addTokenModal').classList.add('flex');
+            const modal = document.getElementById('addTokenModal');
+            // FIX (UI): сначала убираем hidden, затем добавляем flex. Порядок важен:
+            // если добавить flex при активном hidden, специфичность селекторов может
+            // привести к конфликту display и модалка не отобразится.
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
         }
 
         function hideAddTokenModal() {
-            document.getElementById('addTokenModal').classList.add('hidden');
-            document.getElementById('addTokenModal').classList.remove('flex');
+            const modal = document.getElementById('addTokenModal');
+            modal.classList.remove('flex');
+            modal.classList.add('hidden');
             document.getElementById('modalGroupId').value = '';
             document.getElementById('modalToken').value = '';
         }
