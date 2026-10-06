@@ -336,7 +336,8 @@ def index(request: Request, db: Session = Depends(get_db)):
 
 
 @app.get("/content-manager")
-def content_manager_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIrequest: Request, db: Session = Depends(get_db)):
+def content_manager_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    request: Request, db: Session = Depends(get_db)):
     """Рендерит страницу контент-менеджера."""
     user = get_current_user(request, db)
     return templates.TemplateResponse(
@@ -347,7 +348,8 @@ def content_manager_page(  # FIX: Event loop unblocked — синхронный 
 
 
 @app.get("/login")
-def login_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIrequest: Request, db: Session = Depends(get_db)):
+def login_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    request: Request, db: Session = Depends(get_db)):
     """Рендерит страницу входа."""
     user = get_current_user(request, db)
     if user:
@@ -428,7 +430,8 @@ def register(  # FIX: Event loop unblocked — синхронный роут в�
 
 
 @app.get("/logout")
-def logout(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIrequest: Request, db: Session = Depends(get_db)):
+def logout(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    request: Request, db: Session = Depends(get_db)):
     """Выполняет выход пользователя."""
     # FIX: Ненадёжные сессии в памяти — удаляем запись сессии из БД
     session_id = request.cookies.get(SESSION_COOKIE)
@@ -563,7 +566,8 @@ def delete_post(  # FIX: Event loop unblocked — синхронный роут 
 
 
 @app.post("/api/posts/{post_id}/approve")
-def approve_post(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIpost_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def approve_post(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    post_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Меняет статус поста на 'approved'."""
     post = db.query(Post).filter(Post.id == post_id).first()
     
@@ -680,7 +684,8 @@ async def get_status():
 
 
 @app.get("/api/user/me")
-def get_current_user_info(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIrequest: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def get_current_user_info(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Возвращает информацию о текущем авторизованном пользователе."""
     user = get_current_user(request, db)
     if not user:
@@ -697,7 +702,8 @@ def get_current_user_info(  # FIX: Event loop unblocked — синхронный
 
 
 @app.get("/api/user/communities")
-def get_user_communities(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIrequest: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
+def get_user_communities(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Возвращает список сообществ текущего пользователя."""
     user = get_current_user(request, db)
     if not user:
@@ -764,14 +770,12 @@ def add_user_community(  # FIX: Event loop unblocked — синхронный р
         f"[communities/add] Запрос от пользователя (raw body будет залогирован ниже), "
         f"group_id={group_id}, token_length={len(token)}, token_prefix={token[:10]}..."
     )
-    try:
-        raw_body = await request.body()
-        logger.info(
-            f"[communities/add] content-type={request.headers.get('content-type')}, "
-            f"raw_body={raw_body.decode('utf-8', errors='replace')!r}"
-        )
-    except Exception as log_err:
-        logger.warning(f"[communities/add] Не удалось залогировать raw body: {log_err}")
+    # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI,
+    # поэтому здесь нельзя использовать await request.body(); raw body логируется
+    # в async-обработчике ошибок валидации (validation_exception_handler).
+    logger.info(
+        f"[communities/add] content-type={request.headers.get('content-type')}"
+    )
 
     user = get_current_user(request, db)
     if not user:
@@ -1003,7 +1007,8 @@ def register_community(  # FIX: Event loop unblocked — синхронный р
 
 
 @app.delete("/api/communities/{group_id}")
-def unregister_community(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPIgroup_id: int) -> Dict[str, Any]:
+def unregister_community(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    group_id: int) -> Dict[str, Any]:
     """
     Удаляет сообщество из управления.
     
