@@ -575,12 +575,21 @@ def admin_add_community(
 
 # --- Admin: системные настройки AI-моделей (SystemSetting) ---
 
-# Ключи настроек и их fallback-значения из config.py / дефолты генераторов
+# Ключи настроек и их fallback-значения из config.py / дефолты генераторов.
+# FIX: добавлена поддержка облачных провайдеров (OpenAI-совместимые API:
+# OpenRouter, OpenAI, DeepSeek, GigaChat, YandexGPT и т.д.) — настраиваются
+# динамически через SystemSetting без перезапуска приложения.
 AI_SETTING_KEYS = {
+    # Локальный Ollama
     "ollama_base_url": lambda: settings.ollama_url,
     "default_text_model": lambda: "qwen2.5:14b",
     "default_image_model": lambda: "",
     "generation_temperature": lambda: "0.7",
+    # Облачные модели (OpenAI-совместимый Chat Completions API)
+    "ai_provider": lambda: "ollama",  # ollama | cloud
+    "cloud_api_base_url": lambda: "",  # например https://openrouter.ai/api/v1
+    "cloud_api_key": lambda: settings.gigachat_key or "",
+    "cloud_text_model": lambda: "",  # например deepseek/deepseek-chat
 }
 
 
@@ -591,6 +600,44 @@ def get_system_setting(db: Session, key: str) -> str:
         return row.value
     fallback = AI_SETTING_KEYS.get(key)
     return fallback() if fallback else ""
+
+
+def save_system_settings(db: Session, payload: Dict[str, str]) -> None:
+    """Создаёт или обновляет записи SystemSetting (без перезапуска приложения)."""
+    for key, value in payload.items():
+        row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+        if row:
+            row.value = value
+            row.updated_at = datetime.datetime.utcnow()
+        else:
+            db.add(SystemSetting(key=key, value=value))
+    db.commit()
+
+
+def build_ai_config(db: Session) -> Dict[str, Any]:
+    """Собирает актуальную конфигурацию AI из SystemSetting (fallback — config.py).
+
+    Используется админ-роутами и может использоваться генераторами для выбора
+    провайдера (локальный Ollama или облачный OpenAI-совместимый API).
+    """
+    provider = get_system_setting(db, "ai_provider") or "ollama"
+    try:
+        temperature = float(get_system_setting(db, "generation_temperature"))
+    except ValueError:
+        temperature = 0.7
+    text_model = get_system_setting(db, "default_text_model")
+    if provider == "cloud":
+        text_model = get_system_setting(db, "cloud_text_model") or text_model
+    return {
+        "provider": provider if provider in ("ollama", "cloud") else "ollama",
+        "ollama_base_url": get_system_setting(db, "ollama_base_url"),
+        "default_text_model": text_model,
+        "default_image_model": get_system_setting(db, "default_image_model"),
+        "generation_temperature": temperature,
+        "cloud_api_base_url": get_system_setting(db, "cloud_api_base_url"),
+        "cloud_api_key": get_system_setting(db, "cloud_api_key"),
+        "cloud_text_model": get_system_setting(db, "cloud_text_model"),
+    }
 
 
 @app.get("/admin/settings")
@@ -610,19 +657,33 @@ def admin_settings_page(
 
 @app.post("/admin/settings")
 def admin_settings_update(
+    ai_provider: str = Form("ollama"),
     ollama_base_url: str = Form(""),
     default_text_model: str = Form(""),
     default_image_model: str = Form(""),
     generation_temperature: str = Form("0.7"),
+    cloud_api_base_url: str = Form(""),
+    cloud_api_key: str = Form(""),
+    cloud_text_model: str = Form(""),
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
     """Создаёт или обновляет записи SystemSetting (без перезапуска приложения)."""
+    if ai_provider not in ("ollama", "cloud"):
+        raise HTTPException(
+            status_code=400,
+            detail="Неизвестный провайдер AI: выберите 'ollama' или 'cloud'",
+        )
+
     payload = {
+        "ai_provider": ai_provider,
         "ollama_base_url": ollama_base_url.strip(),
         "default_text_model": default_text_model.strip(),
         "default_image_model": default_image_model.strip(),
         "generation_temperature": generation_temperature.strip() or "0.7",
+        "cloud_api_base_url": cloud_api_base_url.strip().rstrip("/"),
+        "cloud_api_key": cloud_api_key.strip(),
+        "cloud_text_model": cloud_text_model.strip(),
     }
     # Валидация температуры
     try:
@@ -634,17 +695,68 @@ def admin_settings_update(
             status_code=400,
             detail="Температура генерации должна быть числом в диапазоне 0.0–2.0",
         )
+    # Валидация облачной конфигурации: без URL/ключа/модели облако работать не будет
+    if payload["ai_provider"] == "cloud":
+        if not payload["cloud_api_base_url"] or not payload["cloud_text_model"]:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Для облачного провайдера обязательны: базовый URL API "
+                    "и название модели"
+                ),
+            )
 
-    for key, value in payload.items():
-        row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
-        if row:
-            row.value = value
-            row.updated_at = datetime.datetime.utcnow()
-        else:
-            db.add(SystemSetting(key=key, value=value))
-    db.commit()
-    logger.info(f"[admin] {admin.email}: обновил системные настройки AI: {list(payload)}")
+    save_system_settings(db, payload)
+    logger.info(
+        f"[admin] {admin.email}: обновил системные настройки AI "
+        f"(провайдер: {payload['ai_provider']})"
+    )
     return RedirectResponse(url="/admin/settings", status_code=302)
+
+
+@app.post("/admin/settings/test-cloud")
+def admin_settings_test_cloud(
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Проверяет подключение к облачной модели: POST {base_url}/chat/completions."""
+    cfg = build_ai_config(db)
+    if cfg["provider"] != "cloud":
+        return JSONResponse(
+            {"ok": False, "detail": "Текущий провайдер — не облачный (cloud)."},
+            status_code=400,
+        )
+    if not cfg["cloud_api_base_url"] or not cfg["cloud_text_model"]:
+        return JSONResponse(
+            {"ok": False, "detail": "Не заданы base URL или модель облачного API."},
+            status_code=400,
+        )
+
+    import requests as _requests
+
+    headers = {"Content-Type": "application/json"}
+    if cfg["cloud_api_key"]:
+        headers["Authorization"] = f"Bearer {cfg['cloud_api_key']}"
+    url = f"{cfg['cloud_api_base_url']}/chat/completions"
+    body = {
+        "model": cfg["cloud_text_model"],
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 5,
+        "temperature": cfg["generation_temperature"],
+    }
+    try:
+        resp = _requests.post(url, json=body, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        reply = (
+            data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            or "(пустой ответ)"
+        )
+        logger.info(f"[admin] {admin.email}: тест облачной модели успешен")
+        return JSONResponse({"ok": True, "reply": reply[:200]})
+    except Exception as e:  # noqa: BLE001 — показываем админу суть ошибки
+        logger.warning(f"[admin] {admin.email}: тест облачной моделине удался: {e}")
+        return JSONResponse({"ok": False, "detail": str(e)[:300]}, status_code=400)
 
 
 # --- Публичная страница заблокированного аккаунта ---
