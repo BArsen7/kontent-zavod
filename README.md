@@ -18,7 +18,8 @@
 - 🎨 **Создание изображений** через Kandinsky (GigaChat Image API)
 - 🧑‍💼 **Персональный ИИ-контент-менеджер** — чат с нейросетью, который задаёт уточняющие вопросы и генерирует контент-план на неделю / 2 недели / месяц (подробнее в [CONTENT_MANAGER_README.md](CONTENT_MANAGER_README.md))
 - ⏰ **Фоновый планировщик** (APScheduler) для автоматической публикации одобренных постов каждые 30 минут
-- 📊 **Веб-интерфейс** (Jinja2): главная страница со списком постов, страница контент-менеджера, страница входа/регистрации
+- 📊 **Веб-интерфейс** (Jinja2 + локальный CSS без CDN): главная страница со списком постов, страница контент-менеджера, страница входа/регистрации
+- 🛡️ **Панель администратора** (`/admin`): сводная статистика, управление пользователями (выдача/снятие прав через `scripts/make_admin.py` и UI), просмотр всех сообществ
 - 🛠️ **CLI-скрипты** для ручного управления и автоматизации рутинных задач
 - 🔄 **CommunityManager (мастер-бот)** — управление множеством сообществ VK через единый интерфейс и LongPoll (архитектура описана в [ARCHITECTURE.md](ARCHITECTURE.md))
 
@@ -60,10 +61,13 @@
 | Генерация текста | `generators/text_generator.py` | `generate_text()` — обёртки над Ollama и GigaChat |
 | Генерация изображений | `generators/image_generator.py` | `generate_kandinsky()` — Kandinsky через GigaChat API |
 | Публикация | `publishers/vk_publisher.py` | `VKPublisher` — публикация в одно сообщество (токен из настроек) |
+| Обработка ошибок VK | `vk_errors.py` | `create_vk_session` (api_version 5.199), `describe_api_error`, `with_retry`, нормализация `group_id` |
 | Мастер-бот | `managers/community_manager.py` | `CommunityManager` — управление множеством сообществ, LongPoll, `/add_token` |
-| Сервис паков | `services/content_service.py` | `generate_weekly_pack()` — генерация недельного пакета постов |
+| Сервис паков | `services/content_service.py` | `generate_weekly_pack()` — генерация пакета постов (week / two_weeks / month) |
 | Контент-менеджер | `services/content_manager_service.py` | Чат с ИИ, генерация и обновление планов, проверка истекающих периодов |
 | Планировщик | `services/scheduler.py` | APScheduler: `check_and_publish()` каждые 30 минут |
+| Панель администратора | `app.py` + `web/templates/admin_*.html` | `/admin`, `/admin/users`, `/admin/communities` — защита `get_current_admin` |
+| Стили UI | `web/static/styles.css` | Локальный stylesheet (замена Tailwind Play CDN): все утилитарные классы шаблонов |
 | Legacy-бот | `bots/vk_bot.py` | Одиночный VK-бот (LongPoll) — оставлен для совместимости, в `app.py` не запускается |
 
 ### Поток данных
@@ -234,7 +238,7 @@ python scripts/setup_db.py --with-test-data
 python scripts/setup_db.py --drop-existing
 ```
 
-Создаваемые таблицы: `users`, `user_communities`, `platform_accounts`, `content_plans`, `posts`, `post_stats`, `content_plan_periods`, `chat_messages`.
+Создаваемые таблицы: `users`, `sessions`, `user_communities`, `platform_accounts`, `content_plans`, `posts`, `post_stats`, `content_plan_periods`, `chat_messages`.
 
 ### Шаг 8: Запуск веб-интерфейса и API
 
@@ -448,6 +452,9 @@ http://<IP_СЕРВЕРА>:8000
 | Вход/регистрация | `/login` | Форма авторизации по email/паролю и регистрации |
 | Главная | `/` | Таблица всех постов (доступна после входа) |
 | Контент-менеджер | `/content-manager` | Чат с ИИ-маркетологом и генерация контент-планов |
+| Админ-дашборд | `/admin` | Сводная статистика (пользователи, сообщества, посты) — только для `is_admin` |
+| Админ: пользователи | `/admin/users` | Список пользователей, переключение прав администратора |
+| Админ: сообщества | `/admin/communities` | Все привязанные сообщества с владельцами |
 
 #### 🔐 Авторизация
 
@@ -455,11 +462,21 @@ http://<IP_СЕРВЕРА>:8000
 
 1. Откройте `/login` (при отсутствии сессии главная страница перенаправляет туда)
 2. Зарегистрируйтесь (email + пароль, опционально имя) или войдите
-3. Пароли хранятся в БД в виде bcrypt-хешей (`passlib`), сессия — httponly-cookie `session_id` (7 дней)
+3. Пароли хранятся в БД в виде bcrypt-хешей (модуль `bcrypt` напрямую — `passlib` несовместим с `bcrypt >= 4.1`), сессия — httponly-cookie `session_id` (7 дней)
 
-> ⚠️ **Важно**:
-> - Сессии хранятся в памяти процесса (`_session_store` в `app.py`). После перезапуска сервера пользователей нужно входить заново. Для продакшена замените на Redis/БД.
-> - API контент-менеджера и управления сообществами требует авторизации (HTTP 401 без сессии).
+> ℹ️ **Сессии хранятся в таблице `sessions` в БД** (модель `models.Session`: `token`, `user_id`, `expires_at`) — активные сессии переживают перезапуск сервера, разлогинивание не требуется. Выход (`GET /logout`) удаляет запись сессии из БД и cookie.
+> API контент-менеджера и управления сообществами требует авторизации (HTTP 401 без сессии). Доступ к `/api/posts` имеют только авторизованные пользователи; возвращаются посты пользователя и опубликованные посты.
+
+#### 🛡️ Панель администратора
+
+Доступ к `/admin*` имеют только пользователи с флагом `User.is_admin`. Выдать права:
+
+```bash
+python scripts/make_admin.py user@example.com            # выдать
+python scripts/make_admin.py user@example.com --revoke   # снять
+```
+
+Первым администратором обычно делают себя сразу после регистрации. В панели можно просматривать статистику, список всех пользователей и сообществ, а также переключать права `is_admin` кнопкой прямо в таблице пользователей (`POST /admin/users/{id}/toggle_admin`).
 
 #### 👥 Управление сообществами
 
@@ -490,10 +507,12 @@ http://<IP_СЕРВЕРА>:8000
 
 #### 📊 Работа с постами
 
-1. **Генерация пака**: `POST /api/generate/weekly` — запускает генерацию 7 постов в фоновом режиме (BackgroundTasks); ниша зафиксирована в коде (`3d_cookies`)
-2. **Одобрение**: `POST /api/posts/{id}/approve` — меняет статус `draft → approved`
-3. **Публикация**: `POST /api/publish/vk/{post_id}` — публикация через CommunityManager (посты со статусом `draft` или `approved`); если `?group_id=` не указан, берётся первое зарегистрированное сообщество. Статус меняется на `published`.
-4. **Автопубликация**: планировщик сам публикует посты `approved` с наступившим `publish_at`, используя `VKPublisher` с токеном из `.env` (см. ниже про `VK_TOKEN`/`VK_GROUP_ID`)
+1. **Генерация пака**: `POST /api/generate/{period_type}` — фоновая генерация пакета постов (`week` — 7, `two_weeks` — 14, `month` — 30; старый URL `/api/generate/weekly` поддерживается как `week`); ниша зафиксирована в коде (`3d_cookies`)
+2. **Одобрение**: `POST /api/posts/{id}/approve` — меняет статус `draft → approved` (одобрять можно только черновики)
+3. **Удаление**: `DELETE /api/posts/{id}` — удаляет пост в статусах `draft`/`approved`; опубликованные посты удалить нельзя
+4. **Публикация**: `POST /api/publish/vk/{post_id}` — публикация через CommunityManager (посты со статусом `draft` или `approved`); если `?group_id=` не указан, берётся первое зарегистрированное сообщество. Статус меняется на `published`.
+5. **Автопубликация**: планировщик сам публикует посты `approved` с наступившим `publish_at`, используя `VKPublisher` с токеном из `.env` (см. ниже про `VK_TOKEN`/`VK_GROUP_ID`)
+6. **Список постов**: `GET /api/posts?skip=0&limit=20` — пагинация (limit до 100), требует авторизации
 
 #### 🧑‍💼 Контент-менеджер
 
@@ -580,6 +599,19 @@ python scripts/setup_db.py
 python scripts/setup_db.py --with-test-data
 ```
 
+#### 5. `make_admin.py` — Права администратора панели
+
+**Аргументы**:
+- `email` (обязательный): Email пользователя (регистронезависимо)
+- `--revoke`: Снять права вместо выдачи
+
+```bash
+python scripts/make_admin.py user@example.com
+python scripts/make_admin.py user@example.com --revoke
+```
+
+Устанавливает `users.is_admin = True` — без этого доступа к `/admin` нет (в UI переключение прав доступно из таблицы пользователей).
+
 ---
 
 ## 🌐 API Endpoints
@@ -606,9 +638,13 @@ http://<IP_СЕРВЕРА>:8000/docs
 
 | Метод | Путь | Описание | Авторизация |
 |-------|------|----------|-------------|
-| `GET` | `/` | Главная страница со списком постов | нет (без сессии — пустой список) |
+| `GET` | `/` | Главная страница со списком постов (посты грузятся фронтендом через `/api/posts`) | нет (без сессии — пустой список) |
 | `GET` | `/content-manager` | Страница контент-менеджера | нет (API страницы — да) |
-| `GET` | `/login` | Страница входа/регистрации | нет |
+| `GET` | `/login` | Страница входа/регистрации (авторизованных редиректит на `/`) | нет |
+| `GET` | `/admin` | Панель администратора: сводная статистика | `is_admin` |
+| `GET` | `/admin/users` | Панель администратора: список пользователей | `is_admin` |
+| `POST` | `/admin/users/{user_id}/toggle_admin` | Выдать/снять права администратора | `is_admin` |
+| `GET` | `/admin/communities` | Панель администратора: все сообщества с владельцами | `is_admin` |
 
 **Аутентификация:**
 
@@ -616,17 +652,18 @@ http://<IP_СЕРВЕРА>:8000/docs
 |-------|------|----------|-----------|
 | `POST` | `/auth/login` | Вход | form: `email`, `password` |
 | `POST` | `/auth/register` | Регистрация | form: `email`, `password`, `first_name`, `last_name` |
-| `GET` | `/logout` | Выход (удаляет сессию и cookie) | — |
+| `GET` | `/logout` | Выход (удаляет сессию из БД и cookie) | — |
 | `GET` | `/api/user/me` | Текущий пользователь | требует сессию |
 
 **Посты и публикация:**
 
 | Метод | Путь | Описание | Параметры |
 |-------|------|----------|-----------|
-| `GET` | `/api/posts` | Список всех постов | — |
-| `POST` | `/api/generate/weekly` | Генерация недельного пака (фон) | ниша фиксирована: `3d_cookies` |
-| `POST` | `/api/posts/{id}/approve` | Одобрить черновик (`draft → approved`) | path: `id` |
-| `POST` | `/api/publish/vk/{id}` | Опубликовать через CommunityManager | path: `id`, query: `group_id` (опц.) |
+| `GET` | `/api/posts` | Список постов текущего пользователя (+published), пагинация | query: `skip` (≥0), `limit` (1–100, по умолч. 20); требует авторизацию |
+| `POST` | `/api/generate/{period_type}` | Генерация пакета постов в фоне (`week`/`two_weeks`/`month`; `weekly` — обратная совместимость) | ниша фиксирована: `3d_cookies` |
+| `DELETE` | `/api/posts/{post_id}` | Удалить пост (`draft`/`approved`; published — нельзя) | path: `post_id`; требует авторизацию |
+| `POST` | `/api/posts/{post_id}/approve` | Одобрить черновик (`draft → approved`) | path: `post_id` |
+| `POST` | `/api/publish/vk/{post_id}` | Опубликовать через CommunityManager | path: `post_id`, query: `group_id` (опц.) |
 | `GET` | `/api/status` | Проверка работоспособности API | — |
 
 **Сообщества:**
@@ -634,10 +671,10 @@ http://<IP_СЕРВЕРА>:8000/docs
 | Метод | Путь | Описание | Авторизация |
 |-------|------|----------|-------------|
 | `GET` | `/api/user/communities` | Сообщества текущего пользователя | да |
-| `POST` | `/api/user/communities/add` | Добавить сообщество (проверка прав админа VK) | да |
+| `POST` | `/api/user/communities/add` | Добавить сообщество (проверка прав админа VK) | да; JSON-body: `{"group_id": int, "token": str}` |
 | `DELETE` | `/api/user/communities/{group_id}` | Отвязать сообщество | да |
 | `GET` | `/api/communities` | Все сообщества CommunityManager | нет |
-| `POST` | `/api/communities/register` | Зарегистрировать сообщество в мастер-боте | нет |
+| `POST` | `/api/communities/register` | Зарегистрировать сообщество в мастер-боте | нет; query-параметры `token`, `group_id` |
 | `DELETE` | `/api/communities/{group_id}` | Удалить сообщество из мастер-бота | нет |
 
 **Контент-менеджер:**
@@ -645,11 +682,13 @@ http://<IP_СЕРВЕРА>:8000/docs
 | Метод | Путь | Описание | Авторизация |
 |-------|------|----------|-------------|
 | `GET` | `/api/content-manager/periods` | Список периодов пользователя | да |
-| `POST` | `/api/content-manager/period/create` | Создать период (`period_type`: week/two_weeks/month) | да |
+| `POST` | `/api/content-manager/period/create` | Создать период (`period_type`: week/two_weeks/month) | да; JSON-body |
 | `GET` | `/api/content-manager/chat/{period_id}` | История чата | да |
-| `POST` | `/api/content-manager/chat/{period_id}/send` | Сообщение в чат, ответ ИИ | да |
+| `POST` | `/api/content-manager/chat/{period_id}/send` | Сообщение в чат, ответ ИИ | да; query-параметр `message` |
 | `POST` | `/api/content-manager/period/{id}/generate-plan` | Сгенерировать план из чата | да |
 | `PUT` | `/api/content-manager/period/{id}/update` | Обновить план (JSON-body: модификации) | да |
+| `PUT` | `/api/content-manager/period/{id}/rename` | Переименовать период (черновик) | да; JSON-body: `{"title": str}` |
+| `DELETE` | `/api/content-manager/period/{id}` | Удалить период с постами и чатом (published/scheduled блокируют) | да |
 | `POST` | `/api/content-manager/check-expiring` | Проверить истекающие планы | да |
 | `GET` | `/api/content-manager/period/{id}/posts` | Посты периода | да |
 
@@ -742,7 +781,9 @@ curl -X POST "http://localhost:8000/api/publish/vk/10?group_id=123456789"
 #### Добавление сообщества (авторизованный пользователь):
 
 ```bash
-curl -X POST "http://localhost:8000/api/user/communities/add?group_id=123456789&token=vk1.a.xxx" \
+curl -X POST "http://localhost:8000/api/user/communities/add" \
+  -H "Content-Type: application/json" \
+  -d '{"group_id": 123456789, "token": "vk1.a.xxx"}' \
   -b cookies.txt
 ```
 
@@ -752,10 +793,11 @@ curl -X POST "http://localhost:8000/api/user/communities/add?group_id=123456789&
 
 ```
 autopilot-content/
-├── app.py                      # FastAPI: lifespan, веб-роуты, API, аутентификация
+├── app.py                      # FastAPI: lifespan, веб-роуты, API, аутентификация, админ-панель
 ├── config.py                   # Settings (pydantic-settings), чтение .env
-├── database.py                 # Engine, SessionLocal, init_db()
-├── models.py                   # SQLAlchemy-модели (8 таблиц)
+├── database.py                 # Engine, SessionLocal, init_db() + лёгкие миграции схемы
+├── models.py                   # SQLAlchemy-модели (9 таблиц, включая sessions)
+├── vk_errors.py                # VK API: сессия (5.199), расшифровка ошибок, retry, group_id
 ├── requirements.txt            # Зависимости Python
 ├── .env.example                # Шаблон переменных окружения
 ├── .gitignore                  # Игнорируемые файлы Git
@@ -778,7 +820,7 @@ autopilot-content/
 │   └── vk_publisher.py         # Публикация ВКонтакте (текст + изображение)
 │
 ├── services/                   # Бизнес-логика
-│   ├── content_service.py      # generate_weekly_pack(): недельный пак постов
+│   ├── content_service.py      # generate_weekly_pack(): пак постов (week/two_weeks/month)
 │   ├── content_manager_service.py  # Чат с ИИ, планы, автообновление
 │   └── scheduler.py            # APScheduler: check_and_publish() каждые 30 мин
 │
@@ -786,13 +828,20 @@ autopilot-content/
 │   ├── generate_post.py        # Генерация одиночного поста
 │   ├── generate_weekly.py      # Генерация недельного пака
 │   ├── publish_pending.py      # Публикация одобренных постов (--limit, --dry-run)
+│   ├── make_admin.py           # Выдача/снятие прав администратора (--revoke)
 │   └── setup_db.py             # Инициализация БД (--with-test-data, --drop-existing)
 │
 ├── web/
+│   ├── static/
+│   │   └── styles.css          # Локальный stylesheet (замена Tailwind Play CDN)
 │   └── templates/              # Jinja2-шаблоны
 │       ├── index.html          # Главная (таблица постов)
 │       ├── login.html          # Вход/регистрация
-│       └── content_manager.html # Интерфейс контент-менеджера
+│       ├── content_manager.html# Интерфейс контент-менеджера (чат + периоды)
+│       ├── admin_base.html     # Каркас админ-панели (сайдбар, навигация)
+│       ├── admin_dashboard.html# Админ: сводная статистика
+│       ├── admin_users.html    # Админ: пользователи + переключение прав
+│       └── admin_communities.html # Админ: все сообщества
 │
 └── data/                       # Данные (каталог создаётся автоматически)
     └── autopilot.db            # SQLite база данных
@@ -802,20 +851,22 @@ autopilot-content/
 
 | Файл/Папка | Назначение |
 |------------|------------|
-| `app.py` | Точка входа FastAPI: lifespan (init_db, CommunityManager, scheduler), роуты, сессии, bcrypt |
-| `config.py` | Класс Settings: db_path, ollama_url, gigachat_key/secret, vk_token/group_id, tg_*, log_level |
-| `database.py` | SQLite engine (`check_same_thread=False`), SessionLocal, get_db(), init_db() |
-| `models.py` | User, UserCommunity, PlatformAccount, ContentPlan, Post, PostStats, ContentPlanPeriod, ChatMessage |
+| `app.py` | Точка входа FastAPI: lifespan (init_db, CommunityManager, scheduler), роуты (включая `/admin*`), сессии в БД, bcrypt, защита `get_current_user`/`require_auth`/`get_current_admin`, раздача `/static` |
+| `config.py` | Класс Settings: db_path, ollama_url, gigachat_key/secret, vk_token/group_id, tg_*, log_level (`extra="ignore"`) |
+| `database.py` | SQLite engine (`check_same_thread=False`), SessionLocal, get_db(), init_db() + авто-миграции (`users.email`, `is_admin`, `content_plan_periods.title`) |
+| `models.py` | User, Session, UserCommunity, PlatformAccount, ContentPlan, Post, PostStats, ContentPlanPeriod, ChatMessage |
+| `vk_errors.py` | create_vk_session (VK_API_VERSION=5.199), describe_api_error, with_retry, positive_group_id/owner_id_for_group, format_photo_attachment |
 | `generators/text_generator.py` | generate_text_ollama (qwen2.5:14b), generate_text_gigachat, generate_text (диспетчер) |
 | `generators/image_generator.py` | _get_gigachat_token (OAuth-авторизация GigaChat), generate_kandinsky |
 | `publishers/vk_publisher.py` | VKPublisher: walls.post с загрузкой фото через docs.getMessagesUploadServer |
 | `managers/community_manager.py` | CommunityManager + CommunityAccount: register/unregister, publish_to_community, LongPoll-потоки, команды бота |
-| `services/content_service.py` | generate_weekly_pack(niche, db): план + 7 постов (prompts по типам) |
+| `services/content_service.py` | generate_weekly_pack(niche, db, period_type): план + пак постов по типам (PACK_PERIODS) |
 | `services/content_manager_service.py` | Периоды, чат-история, generate_ai_response, генерация/обновление плана, check_expiring |
 | `services/scheduler.py` | start_scheduler/stop_scheduler, check_and_publish (каждые 30 мин, Europe/Moscow) |
 | `bots/vk_bot.py` | Legacy-бот для одного сообщества (не активен) |
-| `scripts/*.py` | CLI-утилиты для ручного управления |
-| `web/templates/*.html` | Три страницы интерфейса |
+| `scripts/*.py` | CLI-утилиты для ручного управления (generate_post, generate_weekly, publish_pending, make_admin, setup_db) |
+| `web/static/styles.css` | Все утилитарные CSS-классы интерфейса (flex/grid/отступы/цвета/responsive) — без внешних CDN |
+| `web/templates/*.html` | Семь страниц интерфейса: главная, логин, контент-менеджер, 4 страницы админки |
 
 ---
 
@@ -920,7 +971,7 @@ sudo systemctl status autopilot.service
 
 ### 7. Почему пользователи «разлогиниваются» после рестарта сервера?
 
-Сессии хранятся в словаре в памяти процесса (`_session_store` в `app.py`) — это осознанное упрощение для демонстрации. После перезапуска все cookie становятся невалидными. Для продакшена вынесите сессии в Redis или отдельную таблицу БД.
+Больше не должны: сессии хранятся в таблице `sessions` в БД (модель `models.Session`, срок жизни — 7 дней), поэтому cookie `session_id` остаются валидными после перезапуска uvicorn/systemd. Это исправление старой реализации с in-memory словарём `_session_store`. Если у вас всё ещё слетает вход — убедитесь, что база (`DB_PATH`) не пересоздаётся при старте и что вы не открываете сайт с другого имени хоста (cookie привязаны к домену/порту).
 
 ### 8. Нужно ли настраивать VK_TOKEN/VK_GROUP_ID в .env?
 
@@ -933,6 +984,13 @@ sudo systemctl status autopilot.service
 ### 10. Ошибка 500 при регистрации/входе: `no such column: users.email`
 
 Причина: база `data/autopilot.db` осталась от старой версии проекта с VK OAuth-логином (колонки `vk_id`/`access_token`); `create_all()` не меняет существующие таблицы. В текущей версии `init_db()` автоматически пересоздаёт пустую устаревшую таблицу `users` по новой схеме (email/пароль) при старте сервера — просто обновите `database.py` и перезапустите uvicorn. Если в таблице были данные, сначала сделайте резервную копию `data/autopilot.db`.
+
+### 11. Интерфейс «поехал»: кривые отступы, нет сеток, невидимые уведомления
+
+Причина: раньше шаблоны грузили Tailwind из Play CDN; после перехода на локальный `web/static/styles.css` любые отсутствующие в нём утилитарные классы переставали применяться. В текущей версии stylesheet покрывает все используемые классы (flex/grid, отступы, цвета, responsive-брейкпоинты, тосты `.toast-show`). Если проблема появилась после обновления:
+1. Сделайте **жёсткую перезагрузку** браузера (Ctrl+F5) — CSS агрессивно кэшируется;
+2. Проверьте, что `/static/styles.css` отдаётся сервером (код 200) — раздачу обеспечивает `app.mount("/static", StaticFiles(...))` в `app.py`;
+3. Не добавляйте в шаблоны новые tailwind-классы, не описав их в `styles.css`.
 
 ---
 
