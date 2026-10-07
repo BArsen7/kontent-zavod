@@ -108,6 +108,43 @@ def _migrate_users_is_admin(conn) -> None:
         print("[migration] Добавлена колонка users.is_admin (default False)")
 
 
+def _add_column_if_missing(conn, table: str, column: str, ddl_type: str) -> None:
+    """Безопасно добавляет колонку в существующую таблицу SQLite, если её нет.
+
+    SQLite не поддерживает "ADD COLUMN IF NOT EXISTS", поэтому проверяем
+    схему через inspector и выполняем ALTER TABLE только при отсутствии
+    колонки. Любые ошибки (например, таблица ещё не создана) перехватываются,
+    чтобы миграция никогда не ломала запуск приложения.
+    """
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+        if table not in inspector.get_table_names():
+            return  # таблицы ещё нет — create_all создаст её по новой модели
+        columns = {c["name"] for c in inspector.get_columns(table)}
+        if column in columns:
+            return
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+        print(f"[migration] Добавлена колонка {table}.{column}")
+    except Exception as e:  # noqa: BLE001 — миграция не должна ронять приложение
+        print(f"[migration] Не удалось добавить {table}.{column}: {type(e).__name__}: {e}")
+
+
+def _migrate_block_fields(conn) -> None:
+    """Миграция блокировок: поля is_blocked/blocked_reason/blocked_at.
+
+    Таблица users: is_blocked, blocked_reason, blocked_at.
+    Таблица user_communities: is_blocked, blocked_reason.
+    Существующие записи получают is_blocked = 0 (False).
+    """
+    _add_column_if_missing(conn, "users", "is_blocked", "BOOLEAN NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "users", "blocked_reason", "VARCHAR(500)")
+    _add_column_if_missing(conn, "users", "blocked_at", "DATETIME")
+    _add_column_if_missing(conn, "user_communities", "is_blocked", "BOOLEAN NOT NULL DEFAULT 0")
+    _add_column_if_missing(conn, "user_communities", "blocked_reason", "VARCHAR(500)")
+
+
 def init_db():
     """Инициализация базы данных: миграции и создание всех таблиц."""
     # Импортируем ВСЕ модели здесь, чтобы избежать циклических импортов
@@ -120,3 +157,9 @@ def init_db():
         _migrate_users_is_admin(conn)
 
     Base.metadata.create_all(bind=engine)
+
+    # Новые колонки добавляем ПОСЛЕ create_all: к этому моменту все таблицы
+    # точно существуют (созданы или уже были), а create_all не трогает
+    # существующие таблицы с устаревшей схемой.
+    with engine.begin() as conn:
+        _migrate_block_fields(conn)

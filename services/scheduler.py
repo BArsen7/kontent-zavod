@@ -8,7 +8,7 @@ from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from database import SessionLocal
-from models import Post
+from models import ContentPlanPeriod, Post, User, UserCommunity
 from publishers.vk_publisher import VKPublisher
 from config import settings
 
@@ -16,6 +16,39 @@ logger = logging.getLogger(__name__)
 
 # Глобальная переменная для планировщика
 _scheduler: BackgroundScheduler = None
+
+
+def _is_publishing_allowed(db, post: Post) -> tuple[bool, str]:
+    """Проверяет, разрешена ли публикация поста (защита заблокированных сущностей).
+
+    Правила:
+    1. Если пост привязан к периоду контент-плана, а владелец периода заблокирован
+       (User.is_blocked) — публикация запрещена.
+    2. Если у владельца есть сообщества и ВСЕ его активные для постинга сообщества
+       заблокированы (UserCommunity.is_blocked) — публикация запрещена.
+
+    Возвращает (разрешено: bool, причина_пропуска: str).
+    """
+    period = db.query(ContentPlanPeriod).filter(
+        ContentPlanPeriod.id == post.content_plan_period_id
+    ).first() if post.content_plan_period_id else None
+
+    user = None
+    if period and period.user_id:
+        user = db.query(User).filter(User.id == period.user_id).first()
+
+    if user is not None and getattr(user, "is_blocked", False):
+        return False, f"владелец аккаунта {user.email} заблокирован"
+
+    if user is not None:
+        comms = db.query(UserCommunity).filter(
+            UserCommunity.user_id == user.id,
+            UserCommunity.can_post.is_(True),
+        ).all()
+        if comms and all(getattr(c, "is_blocked", False) for c in comms):
+            return False, f"все сообщества пользователя {user.email} заблокированы"
+
+    return True, ""
 
 
 def check_and_publish():
@@ -50,6 +83,15 @@ def check_and_publish():
         
         for post in posts_to_publish:
             try:
+                # Защита заблокированных сущностей: пропускаем посты, если
+                # владелец или его сообщества заблокированы (не спашим VK API).
+                allowed, skip_reason = _is_publishing_allowed(db, post)
+                if not allowed:
+                    logger.info(
+                        f"Планировщик: пропуск публикации поста ID={post.id} — {skip_reason}"
+                    )
+                    continue
+
                 logger.info(f"Публикация поста ID={post.id} (тип: {post.post_type})")
                 
                 # Получаем текст для публикации

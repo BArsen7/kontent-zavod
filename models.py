@@ -20,6 +20,10 @@ class User(Base):
     photo: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Блокировка аккаунта администратором панели (UX: /account-blocked)
+    is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    blocked_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    blocked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
@@ -58,6 +62,9 @@ class UserCommunity(Base):
     group_token: Mapped[str] = mapped_column(String(500), nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     can_post: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Блокировка сообщества администратором панели (планировщик пропускает такие)
+    is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    blocked_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     user: Mapped["User"] = relationship("User", back_populates="communities")
@@ -189,3 +196,19 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     content_plan_period: Mapped["ContentPlanPeriod"] = relationship("ContentPlanPeriod", back_populates="chat_messages")
+
+
+class SystemSetting(Base):
+    """Модель динамических системных настроек (key-value).
+
+    Используется для хранения настроек AI-моделей без перезапуска приложения
+    (например, "ollama_base_url", "default_text_model", "default_image_model",
+    "generation_temperature"). Fallback при отсутствии записи — config.py.
+    """
+
+    __tablename__ = "system_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

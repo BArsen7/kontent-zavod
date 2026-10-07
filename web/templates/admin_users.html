@@ -3,7 +3,53 @@
 {% block title %}Пользователи — Админ-панель{% endblock %}
 
 {% block content %}
-<h1 class="text-3xl font-bold text-gray-800 mb-6">👥 Пользователи</h1>
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-3xl font-bold text-gray-800">👥 Пользователи</h1>
+    <button type="button"
+            onclick="document.getElementById('add-user-form').classList.toggle('hidden')"
+            class="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-5 rounded-md transition duration-200">
+        ➕ Добавить пользователя
+    </button>
+</div>
+
+<!-- Форма добавления пользователя -->
+<div id="add-user-form" class="hidden bg-white rounded-lg shadow p-6 mb-6">
+    <h2 class="text-lg font-semibold text-gray-800 mb-4">Новый пользователь</h2>
+    <form method="POST" action="/admin/users/add" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Email *</label>
+            <input type="email" name="email" required
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Пароль *</label>
+            <input type="password" name="password" required minlength="6"
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Имя</label>
+            <input type="text" name="first_name"
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Фамилия</label>
+            <input type="text" name="last_name"
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div class="flex items-center">
+            <label class="inline-flex items-center text-sm font-medium text-gray-600">
+                <input type="checkbox" name="make_admin" value="on" class="mr-2">
+                Права администратора
+            </label>
+        </div>
+        <div class="flex items-end">
+            <button type="submit"
+                    class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-5 rounded-md transition duration-200">
+                Создать
+            </button>
+        </div>
+    </form>
+</div>
 
 <div class="bg-white rounded-lg shadow overflow-hidden">
     <table class="min-w-full divide-y divide-gray-200">
@@ -13,6 +59,7 @@
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Админ?</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Статус</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Дата регистрации</th>
                 <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
             </tr>
@@ -30,29 +77,69 @@
                         <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-600">Нет</span>
                     {% endif %}
                 </td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                    {% if user.is_blocked %}
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800">🚫 Заблокирован</span>
+                        {% if user.blocked_reason %}
+                            <p class="text-xs text-red-600 mt-1 max-w-xs">Причина: {{ user.blocked_reason }}</p>
+                        {% endif %}
+                        {% if user.blocked_at %}
+                            <p class="text-xs text-gray-500">с {{ user.blocked_at.strftime("%d.%m.%Y %H:%M") }}</p>
+                        {% endif %}
+                    {% else %}
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-emerald-100 text-emerald-800">✅ Активен</span>
+                    {% endif %}
+                </td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                     {{ user.created_at.strftime("%d.%m.%Y %H:%M") if user.created_at else "—" }}
                 </td>
-                <td class="px-6 py-4 whitespace-nowrap text-right text-sm">
+                <td class="px-6 py-4 whitespace-nowrap text-right text-sm space-x-2">
                     <form method="POST" action="/admin/users/{{ user.id }}/toggle_admin" class="inline"
                           onsubmit="return confirm('Переключить права администратора для {{ user.email }}?');">
                         {% if user.is_admin %}
                             <button type="submit"
-                                    class="bg-gray-400 hover:bg-gray-500 text-white font-semibold py-1 px-4 rounded-md transition duration-200">
+                                    class="bg-gray-400 hover:bg-gray-500 text-white font-semibold py-1 px-3 rounded-md transition duration-200">
                                 Снять админа
                             </button>
                         {% else %}
                             <button type="submit"
-                                    class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-1 px-4 rounded-md transition duration-200">
+                                    class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-1 px-3 rounded-md transition duration-200">
                                 Сделать админом
                             </button>
                         {% endif %}
+                    </form>
+
+                    {% if not user.is_blocked %}
+                    <form method="POST" action="/admin/users/{{ user.id }}/block" class="inline"
+                          onsubmit="var r = prompt('Укажите причину блокировки для {{ user.email }}:', ''); if (r === null) { return false; } this.elements['blocked_reason'].value = r; return confirm('Заблокировать пользователя {{ user.email }}?');">
+                        <input type="hidden" name="blocked_reason" value="">
+                        <button type="submit"
+                                class="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-1 px-3 rounded-md transition duration-200">
+                            Заблокировать
+                        </button>
+                    </form>
+                    {% else %}
+                    <form method="POST" action="/admin/users/{{ user.id }}/unblock" class="inline"
+                          onsubmit="return confirm('Разблокировать {{ user.email }}?');">
+                        <button type="submit"
+                                class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-1 px-3 rounded-md transition duration-200">
+                            Разблокировать
+                        </button>
+                    </form>
+                    {% endif %}
+
+                    <form method="POST" action="/admin/users/{{ user.id }}/delete" class="inline"
+                          onsubmit="return confirm('Удалить пользователя {{ user.email }} безвозвратно? Будут удалены все его сообщества, сессии и контент-планы.');">
+                        <button type="submit"
+                                class="bg-red-600 hover:bg-red-700 text-white font-semibold py-1 px-3 rounded-md transition duration-200">
+                            Удалить
+                        </button>
                     </form>
                 </td>
             </tr>
             {% else %}
             <tr>
-                <td colspan="6" class="px-6 py-8 text-center text-sm text-gray-500">Пользователей нет.</td>
+                <td colspan="7" class="px-6 py-8 text-center text-sm text-gray-500">Пользователей нет.</td>
             </tr>
             {% endfor %}
         </tbody>
