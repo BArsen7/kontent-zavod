@@ -1,0 +1,52 @@
+{% extends "admin_base.html" %}
+
+{% block title %}Настройки AI — Админ-панель{% endblock %}
+
+{% block content %}
+<h1 class="text-3xl font-bold text-gray-800 mb-2">⚙️ Настройки AI-моделей</h1>
+<p class="text-sm text-gray-500 mb-6">
+    Значения сохраняются в БД (таблица <code>system_settings</code>) и применяются без перезапуска
+    приложения. Если значение не задано, используется fallback из <code>config.py</code> / значений по умолчанию.
+</p>
+
+<div class="bg-white rounded-lg shadow p-6 max-w-2xl">
+    <form method="POST" action="/admin/settings" class="space-y-5">
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Базовый URL Ollama</label>
+            <input type="url" name="ollama_base_url" value="{{ values.ollama_base_url }}"
+                   placeholder="http://localhost:11434"
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <p class="text-xs text-gray-400 mt-1">Fallback: settings.ollama_url (config.py)</p>
+        </div>
+
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Модель для текста по умолчанию</label>
+            <input type="text" name="default_text_model" value="{{ values.default_text_model }}"
+                   placeholder="qwen2.5:14b"
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <p class="text-xs text-gray-400 mt-1">Используется генератором текста (Ollama /api/generate)</p>
+        </div>
+
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Модель для изображений по умолчанию</label>
+            <input type="text" name="default_image_model" value="{{ values.default_image_model }}"
+                   placeholder="например, sd-xl / flux-schnell"
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <p class="text-xs text-gray-400 mt-1">Используется генератором изображений</p>
+        </div>
+
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Температура генерации</label>
+            <input type="number" name="generation_temperature" value="{{ values.generation_temperature }}"
+                   min="0" max="2" step="0.1"
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <p class="text-xs text-gray-400 mt-1">Число от 0.0 (детерминированно) до 2.0 (максимально креативно)</p>
+        </div>
+
+        <button type="submit"
+                class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-md transition duration-200">
+            💾 Сохранить настройки
+        </button>
+    </form>
+</div>
+{% endblock %}

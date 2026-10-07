@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Аккаунт заблокирован — Autopilot Content</title>
+    <!-- FIX: Tailwind Play CDN заменён на локальный styles.css -->
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body class="bg-gray-100 min-h-screen flex items-center justify-center p-6">
+    <div class="bg-white rounded-lg shadow-lg max-w-lg w-full p-8 text-center">
+        <div class="text-6xl mb-4">🚫</div>
+        <h1 class="text-2xl font-bold text-gray-800 mb-2">Аккаунт заблокирован</h1>
+        <p class="text-gray-600 mb-6">
+            Доступ к вашему аккаунту временно ограничен администратором.
+            {% if user and user.email %}
+                <br><span class="text-sm text-gray-500">Учётная запись: {{ user.email }}</span>
+            {% endif %}
+        </p>
+
+        {% if user and user.is_blocked %}
+        <div class="bg-red-50 border border-red-200 rounded-md p-4 text-left mb-6">
+            <p class="text-sm font-semibold text-red-800 mb-1">Причина блокировки:</p>
+            <p class="text-sm text-red-700">{{ user.blocked_reason or "Причина не указана" }}</p>
+            {% if user.blocked_at %}
+            <p class="text-xs text-red-600 mt-2">
+                Заблокирован: {{ user.blocked_at.strftime("%d.%m.%Y %H:%M") }}
+            </p>
+            {% endif %}
+        </div>
+        {% else %}
+        <div class="bg-gray-50 border border-gray-200 rounded-md p-4 text-left mb-6">
+            <p class="text-sm text-gray-600">
+                Если вы считаете, что блокировка выполнена по ошибке, свяжитесь с администратором.
+            </p>
+        </div>
+        {% endif %}
+
+        <div class="bg-blue-50 border border-blue-200 rounded-md p-4 text-left mb-6">
+            <p class="text-sm font-semibold text-blue-800 mb-1">Контакт администратора для связи:</p>
+            <p class="text-sm text-blue-700 break-all">
+                {% if admin_contact %}{{ admin_contact }}{% else %}support@kontent-zavod.ru{% endif %}
+            </p>
+        </div>
+
+        <a href="/logout"
+           class="inline-block bg-gray-600 hover:bg-gray-700 text-white font-semibold py-2 px-6 rounded-md transition duration-200">
+            Выйти
+        </a>
+    </div>
+</body>
+</html>

@@ -3,7 +3,47 @@
 {% block title %}Сообщества — Админ-панель{% endblock %}
 
 {% block content %}
-<h1 class="text-3xl font-bold text-gray-800 mb-6">🌐 Сообщества</h1>
+<div class="flex items-center justify-between mb-6">
+    <h1 class="text-3xl font-bold text-gray-800">🌐 Сообщества</h1>
+    <button type="button"
+            onclick="document.getElementById('add-comm-form').classList.toggle('hidden')"
+            class="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-5 rounded-md transition duration-200">
+        ➕ Добавить сообщество
+    </button>
+</div>
+
+<!-- Форма добавления сообщества (привязка group_id/group_token к пользователю) -->
+<div id="add-comm-form" class="hidden bg-white rounded-lg shadow p-6 mb-6">
+    <h2 class="text-lg font-semibold text-gray-800 mb-4">Новое сообщество</h2>
+    <form method="POST" action="/admin/communities/add" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Email владельца *</label>
+            <input type="email" name="owner_email" required
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">ID группы VK *</label>
+            <input type="number" name="group_id" required
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Токен сообщества *</label>
+            <input type="text" name="group_token" required
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Название группы</label>
+            <input type="text" name="group_name"
+                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+        </div>
+        <div class="md:col-span-2">
+            <button type="submit"
+                    class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-5 rounded-md transition duration-200">
+                Привязать сообщество
+            </button>
+        </div>
+    </form>
+</div>
 
 <div class="bg-white rounded-lg shadow overflow-hidden">
     <table class="min-w-full divide-y divide-gray-200">
@@ -12,7 +52,9 @@
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID группы</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Название</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Владелец (email)</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Статус</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Дата добавления</th>
+                <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
             </tr>
         </thead>
         <tbody class="bg-white divide-y divide-gray-200">
@@ -21,13 +63,53 @@
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ comm.group_id }}</td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-800">{{ comm.group_name }}</td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{{ comm.owner_email }}</td>
+                <td class="px-6 py-4 whitespace-nowrap">
+                    {% if comm.is_blocked %}
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800">🚫 Заблокировано</span>
+                        {% if comm.blocked_reason %}
+                            <p class="text-xs text-red-600 mt-1 max-w-xs">Причина: {{ comm.blocked_reason }}</p>
+                        {% endif %}
+                    {% elif comm.owner_is_blocked %}
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-orange-100 text-orange-800">⚠️ Владелец заблокирован</span>
+                    {% else %}
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-emerald-100 text-emerald-800">✅ Активно</span>
+                    {% endif %}
+                </td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                     {{ comm.created_at.strftime("%d.%m.%Y %H:%M") if comm.created_at else "—" }}
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-right text-sm space-x-2">
+                    {% if not comm.is_blocked %}
+                    <form method="POST" action="/admin/communities/{{ comm.id }}/block" class="inline"
+                          onsubmit="var r = prompt('Укажите причину блокировки сообщества «{{ comm.group_name }}»:', ''); if (r === null) { return false; } this.elements['blocked_reason'].value = r; return confirm('Заблокировать сообщество «{{ comm.group_name }}»? Публикация будет остановлена.');">
+                        <input type="hidden" name="blocked_reason" value="">
+                        <button type="submit"
+                                class="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-1 px-3 rounded-md transition duration-200">
+                            Заблокировать
+                        </button>
+                    </form>
+                    {% else %}
+                    <form method="POST" action="/admin/communities/{{ comm.id }}/unblock" class="inline"
+                          onsubmit="return confirm('Разблокировать сообщество «{{ comm.group_name }}»?');">
+                        <button type="submit"
+                                class="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold py-1 px-3 rounded-md transition duration-200">
+                            Разблокировать
+                        </button>
+                    </form>
+                    {% endif %}
+
+                    <form method="POST" action="/admin/communities/{{ comm.id }}/delete" class="inline"
+                          onsubmit="return confirm('Удалить сообщество «{{ comm.group_name }}» (group_id={{ comm.group_id }})?';">
+                        <button type="submit"
+                                class="bg-red-600 hover:bg-red-700 text-white font-semibold py-1 px-3 rounded-md transition duration-200">
+                            Удалить
+                        </button>
+                    </form>
                 </td>
             </tr>
             {% else %}
             <tr>
-                <td colspan="4" class="px-6 py-8 text-center text-sm text-gray-500">Сообществ пока нет.</td>
+                <td colspan="6" class="px-6 py-8 text-center text-sm text-gray-500">Сообществ пока нет.</td>
             </tr>
             {% endfor %}
         </tbody>

@@ -25,7 +25,15 @@ from sqlalchemy.orm import Session
 from config import settings
 from database import get_db, init_db
 # FIX: Ненадёжные сессии в памяти -> персистентная модель Session в БД
-from models import ChatMessage, ContentPlanPeriod, Post, Session as DbSession, User, UserCommunity
+from models import (
+    ChatMessage,
+    ContentPlanPeriod,
+    Post,
+    Session as DbSession,
+    SystemSetting,
+    User,
+    UserCommunity,
+)
 from services.content_service import generate_weekly_pack, PACK_PERIODS
 from services.content_manager_service import (
     get_or_create_content_plan_period,
@@ -194,6 +202,9 @@ def require_auth(request: Request, db: Session = Depends(get_db)) -> User:
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Требуется авторизация")
+    if getattr(user, "is_blocked", False):
+        # UX: заблокированный аккаунт — редирект на страницу с причиной
+        return RedirectResponse(url="/account-blocked", status_code=302)  # type: ignore[return-value]
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Аккаунт деактивирован")
     return user
@@ -204,12 +215,19 @@ def get_current_admin(request: Request, db: Session = Depends(get_db)) -> User:
 
     Используется для защиты эндпоинтов панели администратора.
     Права выдаются скриптом scripts/make_admin.py (поле User.is_admin).
+    Заблокированный администратор перенаправляется на /account-blocked.
     """
     user = get_current_user(request, db)
     if not user or not getattr(user, "is_admin", False):
         raise HTTPException(
             status_code=403,
             detail="Доступ запрещен. Требуются права администратора.",
+        )
+    if getattr(user, "is_blocked", False):
+        raise HTTPException(
+            status_code=307,
+            detail="account-blocked",
+            headers={"Location": "/account-blocked"},
         )
     return user
 
@@ -300,10 +318,14 @@ def admin_communities_page(  # FIX: Event loop unblocked — синхронны�
     )
     communities = [
         {
+            "id": uc.id,
             "group_id": uc.group_id,
             "group_name": uc.group_name or f"Группа {uc.group_id}",
             "owner_email": owner.email,
             "created_at": uc.created_at,
+            "is_blocked": getattr(uc, "is_blocked", False),
+            "blocked_reason": uc.blocked_reason,
+            "owner_is_blocked": getattr(owner, "is_blocked", False),
         }
         for uc, owner in rows
     ]
@@ -314,6 +336,327 @@ def admin_communities_page(  # FIX: Event loop unblocked — синхронны�
         request=request,
         name="admin_communities.html",
         context={"user": admin, "admin": admin, "communities": communities},
+    )
+
+
+# --- Admin: управление пользователями (блокировка/разблокировка/удаление/добавление) ---
+
+@app.post("/admin/users/{user_id}/block")
+def admin_block_user(
+    user_id: int,
+    blocked_reason: str = Form(""),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Блокирует пользователя с указанием причины; активные сессии удаляются."""
+    target_user = db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    if target_user.id == admin.id:
+        raise HTTPException(status_code=400, detail="Нельзя заблокировать самого себя")
+
+    target_user.is_blocked = True
+    target_user.blocked_reason = blocked_reason.strip() or "Причина не указана"
+    target_user.blocked_at = datetime.datetime.now()
+    # Разрываем активные сессии заблокированного пользователя
+    db.query(DbSession).filter(DbSession.user_id == target_user.id).delete()
+    db.commit()
+    logger.info(
+        f"[admin] {admin.email}: заблокировал пользователя id={target_user.id} "
+        f"({target_user.email}): причина='{target_user.blocked_reason}'"
+    )
+    return RedirectResponse(url="/admin/users", status_code=302)
+
+
+@app.post("/admin/users/{user_id}/unblock")
+def admin_unblock_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Снимает блокировку с пользователя."""
+    target_user = db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    target_user.is_blocked = False
+    target_user.blocked_reason = None
+    target_user.blocked_at = None
+    db.commit()
+    logger.info(
+        f"[admin] {admin.email}: разблокировал пользователя id={target_user.id} "
+        f"({target_user.email})"
+    )
+    return RedirectResponse(url="/admin/users", status_code=302)
+
+
+@app.post("/admin/users/{user_id}/delete")
+def admin_delete_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Удаляет пользователя; связанные данные удаляются каскадно (SQLAlchemy cascade)."""
+    target_user = db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    if target_user.id == admin.id:
+        raise HTTPException(status_code=400, detail="Нельзя удалить самого себя")
+
+    email = target_user.email
+    # Каскадное удаление связей через relationship(cascade="all, delete-orphan"):
+    # communities (UserCommunity) — по relationship User.communities.
+    db.delete(target_user)
+    db.flush()
+    # Сессии и периоды контент-планов удаляем явно (FK без relationship-cascade).
+    db.query(DbSession).filter(DbSession.user_id == user_id).delete()
+    period_ids = [
+        pid for (pid,) in db.query(ContentPlanPeriod.id)
+        .filter(ContentPlanPeriod.user_id == user_id).all()
+    ]
+    if period_ids:
+        db.query(Post).filter(Post.content_plan_period_id.in_(period_ids)).update(
+            {Post.content_plan_period_id: None}, synchronize_session=False
+        )
+        db.query(ContentPlanPeriod).filter(ContentPlanPeriod.id.in_(period_ids)).delete(
+            synchronize_session=False
+        )
+    db.commit()
+    logger.info(f"[admin] {admin.email}: удалил пользователя id={user_id} ({email})")
+    return RedirectResponse(url="/admin/users", status_code=302)
+
+
+@app.post("/admin/users/add")
+def admin_add_user(
+    email: str = Form(...),
+    password: str = Form(...),
+    first_name: str = Form(""),
+    last_name: str = Form(""),
+    make_admin: str = Form("off"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Создаёт нового пользователя из админ-панели (пароль хешируется bcrypt)."""
+    email = email.strip().lower()
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="Email и пароль обязательны")
+    if db.query(User).filter(User.email == email).first():
+        raise HTTPException(status_code=400, detail="Пользователь с таким email уже существует")
+
+    user = User(
+        email=email,
+        password_hash=hash_password(password),  # bcrypt-хеширование
+        first_name=first_name.strip() or None,
+        last_name=last_name.strip() or None,
+        is_active=True,
+        is_admin=(make_admin == "on"),
+    )
+    db.add(user)
+    try:
+        db.commit()
+        db.refresh(user)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"[admin] {admin.email}: ошибка создания пользователя {email}: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка сервера при создании: {str(e)}")
+    logger.info(f"[admin] {admin.email}: создал пользователя id={user.id} ({email})")
+    return RedirectResponse(url="/admin/users", status_code=302)
+
+
+# --- Admin: управление сообществами (блокировка/разблокировка/удаление/добавление) ---
+
+@app.post("/admin/communities/{comm_id}/block")
+def admin_block_community(
+    comm_id: int,
+    blocked_reason: str = Form(""),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Блокирует сообщество (планировщик перестанет публиковать его посты)."""
+    uc = db.query(UserCommunity).filter(UserCommunity.id == comm_id).first()
+    if not uc:
+        raise HTTPException(status_code=404, detail="Сообщество не найдено")
+
+    uc.is_blocked = True
+    uc.blocked_reason = blocked_reason.strip() or "Причина не указана"
+    db.commit()
+    logger.info(
+        f"[admin] {admin.email}: заблокировал сообщество id={uc.id} "
+        f"(group_id={uc.group_id}): причина='{uc.blocked_reason}'"
+    )
+    return RedirectResponse(url="/admin/communities", status_code=302)
+
+
+@app.post("/admin/communities/{comm_id}/unblock")
+def admin_unblock_community(
+    comm_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Снимает блокировку с сообщества."""
+    uc = db.query(UserCommunity).filter(UserCommunity.id == comm_id).first()
+    if not uc:
+        raise HTTPException(status_code=404, detail="Сообщество не найдено")
+
+    uc.is_blocked = False
+    uc.blocked_reason = None
+    db.commit()
+    logger.info(
+        f"[admin] {admin.email}: разблокировал сообщество id={uc.id} (group_id={uc.group_id})"
+    )
+    return RedirectResponse(url="/admin/communities", status_code=302)
+
+
+@app.post("/admin/communities/{comm_id}/delete")
+def admin_delete_community(
+    comm_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Удаляет связь пользователя с сообществом из БД."""
+    uc = db.query(UserCommunity).filter(UserCommunity.id == comm_id).first()
+    if not uc:
+        raise HTTPException(status_code=404, detail="Сообщество не найдено")
+
+    group_id = uc.group_id
+    db.delete(uc)
+    db.commit()
+    logger.info(
+        f"[admin] {admin.email}: удалил сообщество id={comm_id} (group_id={group_id})"
+    )
+    return RedirectResponse(url="/admin/communities", status_code=302)
+
+
+@app.post("/admin/communities/add")
+def admin_add_community(
+    owner_email: str = Form(...),
+    group_id: int = Form(...),
+    group_token: str = Form(...),
+    group_name: str = Form(""),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Привязывает существующее VK-сообщество к выбранному пользователю."""
+    owner = db.query(User).filter(User.email == owner_email.strip().lower()).first()
+    if not owner:
+        # Пробуем точное совпадение email (регистр мог быть сохранён при регистрации)
+        owner = db.query(User).filter(User.email == owner_email.strip()).first()
+    if not owner:
+        raise HTTPException(status_code=404, detail="Владелец с таким email не найден")
+
+    exists = (
+        db.query(UserCommunity)
+        .filter(UserCommunity.user_id == owner.id, UserCommunity.group_id == group_id)
+        .first()
+    )
+    if exists:
+        raise HTTPException(
+            status_code=400,
+            detail="Это сообщество уже привязано к данному пользователю",
+        )
+
+    uc = UserCommunity(
+        user_id=owner.id,
+        group_id=group_id,
+        group_name=group_name.strip() or f"Группа {group_id}",
+        group_token=group_token.strip(),
+        is_admin=True,
+        can_post=True,
+    )
+    db.add(uc)
+    db.commit()
+    db.refresh(uc)
+    logger.info(
+        f"[admin] {admin.email}: добавил сообщество id={uc.id} (group_id={group_id}) "
+        f"для пользователя {owner.email}"
+    )
+    return RedirectResponse(url="/admin/communities", status_code=302)
+
+
+# --- Admin: системные настройки AI-моделей (SystemSetting) ---
+
+# Ключи настроек и их fallback-значения из config.py / дефолты генераторов
+AI_SETTING_KEYS = {
+    "ollama_base_url": lambda: settings.ollama_url,
+    "default_text_model": lambda: "qwen2.5:14b",
+    "default_image_model": lambda: "",
+    "generation_temperature": lambda: "0.7",
+}
+
+
+def get_system_setting(db: Session, key: str) -> str:
+    """Читает настройку из SystemSetting; при отсутствии — fallback из config.py."""
+    row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+    if row is not None:
+        return row.value
+    fallback = AI_SETTING_KEYS.get(key)
+    return fallback() if fallback else ""
+
+
+@app.get("/admin/settings")
+def admin_settings_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Страница настроек AI: значения из SystemSetting или fallback из config.py."""
+    values = {key: get_system_setting(db, key) for key in AI_SETTING_KEYS}
+    return templates.TemplateResponse(
+        request=request,
+        name="admin_settings.html",
+        context={"user": admin, "admin": admin, "values": values},
+    )
+
+
+@app.post("/admin/settings")
+def admin_settings_update(
+    ollama_base_url: str = Form(""),
+    default_text_model: str = Form(""),
+    default_image_model: str = Form(""),
+    generation_temperature: str = Form("0.7"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Создаёт или обновляет записи SystemSetting (без перезапуска приложения)."""
+    payload = {
+        "ollama_base_url": ollama_base_url.strip(),
+        "default_text_model": default_text_model.strip(),
+        "default_image_model": default_image_model.strip(),
+        "generation_temperature": generation_temperature.strip() or "0.7",
+    }
+    # Валидация температуры
+    try:
+        t = float(payload["generation_temperature"])
+        if not (0.0 <= t <= 2.0):
+            raise ValueError
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail="Температура генерации должна быть числом в диапазоне 0.0–2.0",
+        )
+
+    for key, value in payload.items():
+        row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+        if row:
+            row.value = value
+            row.updated_at = datetime.datetime.utcnow()
+        else:
+            db.add(SystemSetting(key=key, value=value))
+    db.commit()
+    logger.info(f"[admin] {admin.email}: обновил системные настройки AI: {list(payload)}")
+    return RedirectResponse(url="/admin/settings", status_code=302)
+
+
+# --- Публичная страница заблокированного аккаунта ---
+
+@app.get("/account-blocked")
+def account_blocked_page(request: Request, db: Session = Depends(get_db)):
+    """Рендерит страницу 'Аккаунт заблокирован' с причиной и датой блокировки."""
+    user = get_current_user(request, db)
+    return templates.TemplateResponse(
+        request=request,
+        name="account_blocked.html",
+        context={"user": user},
     )
 
 
