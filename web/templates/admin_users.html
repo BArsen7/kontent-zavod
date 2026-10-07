@@ -113,9 +113,11 @@
                     <form method="POST" action="/admin/users/{{ user.id }}/block" class="inline"
                           onsubmit="var r = prompt('Укажите причину блокировки для {{ user.email }}:', ''); if (r === null) { return false; } this.elements['blocked_reason'].value = r; return confirm('Заблокировать пользователя {{ user.email }}?');">
                         <input type="hidden" name="blocked_reason" value="">
+                        <!-- FIX (UI): bg-yellow-500 отсутствовал в локальном styles.css и был
+                             почти нечитаем с белым текстом — заменён на тёмный amber-700. -->
                         <button type="submit"
-                                class="bg-yellow-500 hover:bg-yellow-600 text-white font-semibold py-1 px-3 rounded-md transition duration-200">
-                            Заблокировать
+                                class="btn-block bg-amber-700 hover:bg-amber-800 text-white font-semibold py-1 px-3 rounded-md transition duration-200">
+                            🚫 Заблокировать
                         </button>
                     </form>
                     {% else %}

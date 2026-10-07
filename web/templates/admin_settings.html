@@ -9,23 +9,85 @@
     приложения. Если значение не задано, используется fallback из <code>config.py</code> / значений по умолчанию.
 </p>
 
-<div class="bg-white rounded-lg shadow p-6 max-w-2xl">
+<div class="bg-white rounded-lg shadow p-6 max-w-2xl mb-6">
     <form method="POST" action="/admin/settings" class="space-y-5">
+
+        <!-- Выбор провайдера -->
         <div>
-            <label class="block text-sm font-medium text-gray-600 mb-1">Базовый URL Ollama</label>
-            <input type="url" name="ollama_base_url" value="{{ values.ollama_base_url }}"
-                   placeholder="http://localhost:11434"
-                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <p class="text-xs text-gray-400 mt-1">Fallback: settings.ollama_url (config.py)</p>
+            <label class="block text-sm font-medium text-gray-600 mb-2">Провайдер генерации текста</label>
+            <div class="flex gap-4">
+                <label class="inline-flex items-center text-sm font-medium text-gray-700">
+                    <input type="radio" name="ai_provider" value="ollama"
+                           {% if values.ai_provider != 'cloud' %}checked{% endif %}
+                           onclick="toggleCloud(true)" class="mr-2">
+                        🖥️ Локальный Ollama
+                </label>
+                <label class="inline-flex items-center text-sm font-medium text-gray-700">
+                    <input type="radio" name="ai_provider" value="cloud"
+                           {% if values.ai_provider == 'cloud' %}checked{% endif %}
+                           onclick="toggleCloud(false)" class="mr-2">
+                        ☁️ Облачная модель (OpenAI-совместимый API)
+                </label>
+            </div>
+            <p class="text-xs text-gray-400 mt-1">
+                Подойдёт любой API с совместимым <code>/chat/completions</code>: OpenRouter, OpenAI,
+                DeepSeek, GigaChat (через прокси), YandexGPT и т.д.
+            </p>
         </div>
 
-        <div>
-            <label class="block text-sm font-medium text-gray-600 mb-1">Модель для текста по умолчанию</label>
-            <input type="text" name="default_text_model" value="{{ values.default_text_model }}"
-                   placeholder="qwen2.5:14b"
-                   class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
-            <p class="text-xs text-gray-400 mt-1">Используется генератором текста (Ollama /api/generate)</p>
+        <hr class="border-gray-200">
+
+        <!-- Секция: локальный Ollama -->
+        <div id="ollama-section" class="space-y-5">
+            <h2 class="text-lg font-semibold text-gray-800">🖥️ Локальный Ollama</h2>
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Базовый URL Ollama</label>
+                <input type="url" name="ollama_base_url" value="{{ values.ollama_base_url }}"
+                       placeholder="http://localhost:11434"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <p class="text-xs text-gray-400 mt-1">Fallback: settings.ollama_url (config.py)</p>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Модель для текста по умолчанию</label>
+                <input type="text" name="default_text_model" value="{{ values.default_text_model }}"
+                       placeholder="qwen2.5:14b"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <p class="text-xs text-gray-400 mt-1">Используется генератором текста (Ollama /api/generate)</p>
+            </div>
         </div>
+
+        <!-- Секция: облачные модели -->
+        <div id="cloud-section" class="space-y-5 {% if values.ai_provider != 'cloud' %}hidden{% endif %}">
+            <h2 class="text-lg font-semibold text-gray-800">☁️ Облачные модели</h2>
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Базовый URL API облака</label>
+                <input type="url" name="cloud_api_base_url" value="{{ values.cloud_api_base_url }}"
+                       placeholder="https://openrouter.ai/api/v1"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <p class="text-xs text-gray-400 mt-1">
+                    Без завершающего слэша. Запрос отправляется на <code>{URL}/chat/completions</code>.
+                </p>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">API-ключ (Bearer token)</label>
+                <input type="password" name="cloud_api_key" value="{{ values.cloud_api_key }}"
+                       placeholder="sk-or-v1-..." autocomplete="off"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <p class="text-xs text-gray-400 mt-1">Хранится в таблице <code>system_settings</code>. Отправляется в заголовке <code>Authorization: Bearer &lt;ключ&gt;</code>.</p>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Модель облака</label>
+                <input type="text" name="cloud_text_model" value="{{ values.cloud_text_model }}"
+                       placeholder="deepseek/deepseek-chat или openai/gpt-4o-mini"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <p class="text-xs text-gray-400 mt-1">Обязательна при выборе облачного провайдера.</p>
+            </div>
+        </div>
+
+        <hr class="border-gray-200">
 
         <div>
             <label class="block text-sm font-medium text-gray-600 mb-1">Модель для изображений по умолчанию</label>
@@ -43,10 +105,53 @@
             <p class="text-xs text-gray-400 mt-1">Число от 0.0 (детерминированно) до 2.0 (максимально креативно)</p>
         </div>
 
-        <button type="submit"
-                class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-md transition duration-200">
-            💾 Сохранить настройки
-        </button>
+        <div class="flex items-center gap-4">
+            <button type="submit"
+                    class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-md transition duration-200">
+                💾 Сохранить настройки
+            </button>
+        </div>
     </form>
 </div>
+
+<!-- Блок проверки облачного подключения (после сохранения настроек) -->
+<div class="bg-white rounded-lg shadow p-6 max-w-2xl">
+    <h2 class="text-lg font-semibold text-gray-800 mb-2">🔌 Проверка подключения к облачной модели</h2>
+    <p class="text-sm text-gray-500 mb-4">
+        Тест использует <b>сохранённые</b> значения из БД. Сначала сохраните настройки, затем нажмите кнопку.
+    </p>
+    <button type="button" id="btn-test-cloud" onclick="testCloud()"
+            class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-6 rounded-md transition duration-200">
+        ⚡ Проверить подключение
+    </button>
+    <div id="test-result" class="mt-4 hidden text-sm rounded-md px-4 py-3"></div>
+</div>
+
+<script>
+    function toggleCloud(isOllama) {
+        document.getElementById('ollama-section').classList.toggle('hidden', !isOllama);
+        document.getElementById('cloud-section').classList.toggle('hidden', isOllama);
+    }
+
+    function testCloud() {
+        const box = document.getElementById('test-result');
+        box.classList.remove('hidden', 'bg-green-100', 'bg-red-100');
+        box.textContent = 'Проверяю подключение…';
+        fetch('/admin/settings/test-cloud', { method: 'POST' })
+            .then(r => r.json().then(j => ({ status: r.status, body: j })))
+            .then(({ status, body }) => {
+                if (status === 200 && body.ok) {
+                    box.classList.add('bg-green-100');
+                    box.innerHTML = '✅ Подключение успешно. Ответ модели: <b>' + (body.reply || '') + '</b>';
+                } else {
+                    box.classList.add('bg-red-100');
+                    box.innerHTML = '❌ Ошибка: ' + (body.detail || 'неизвестная ошибка');
+                }
+            })
+            .catch(err => {
+                box.classList.add('bg-red-100');
+                box.textContent = '❌ Сетевая ошибка: ' + err;
+            });
+    }
+</script>
 {% endblock %}
