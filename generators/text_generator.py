@@ -216,17 +216,35 @@ def generate_text_cloud(
 def _load_dynamic_ai_config():
     """Читает настройки AI из SystemSetting напрямую из БД (без импорта app.py)."""
     try:
-        from database import SessionLocal
+        from database import SessionLocal, init_db
         from models import SystemSetting
 
         db = SessionLocal()
         try:
             rows = db.query(SystemSetting).all()
             return {r.key: r.value for r in rows}
+        except Exception as e:  # noqa: BLE001
+            # FIX: «no such table: system_settings» в старой/битой БД — раньше
+            # ошибка молча глоталась ниже и провайдер из админ-панели
+            # (например, gigachat) игнорировался: генерация деградировала до
+            # локальной Ollama. Пытаемся один раз выполнить миграции и повторить.
+            logger.warning(
+                f"Не удалось прочитать SystemSetting ({type(e).__name__}: {e}) — "
+                "пробую выполнить миграции БД и повторить чтение настроек"
+            )
+            db.rollback()
+            try:
+                init_db()
+                rows = db.query(SystemSetting).all()
+                return {r.key: r.value for r in rows}
+            except Exception as e2:  # noqa: BLE001
+                logger.error(f"Повторное чтение SystemSetting не удалось: {e2}")
+                db.rollback()
+                return None
         finally:
             db.close()
     except Exception as e:
-        logger.debug(f"Не удалось прочитать SystemSetting из БД: {e}")
+        logger.warning(f"Не удалось подключиться к БД для чтения SystemSetting: {e}")
         return None
 
 

@@ -302,17 +302,34 @@ def generate_kandinsky(
 def _load_dynamic_image_config() -> dict:
     """Читает настройки изображений из SystemSetting (без импорта app.py)."""
     try:
-        from database import SessionLocal
+        from database import SessionLocal, init_db
         from models import SystemSetting
 
         db = SessionLocal()
         try:
             rows = db.query(SystemSetting).all()
             return {r.key: r.value for r in rows}
+        except Exception as e:  # noqa: BLE001
+            # FIX: см. аналогичный фикс в text_generator — при «no such table»
+            # пытаемся выполнить миграции и прочитать настройки повторно,
+            # иначе провайдер изображений из админ-панели молча игнорируется.
+            logger.warning(
+                f"Не удалось прочитать SystemSetting ({type(e).__name__}: {e}) — "
+                "пробую выполнить миграции БД и повторить чтение настроек"
+            )
+            db.rollback()
+            try:
+                init_db()
+                rows = db.query(SystemSetting).all()
+                return {r.key: r.value for r in rows}
+            except Exception as e2:  # noqa: BLE001
+                logger.error(f"Повторное чтение SystemSetting не удалось: {e2}")
+                db.rollback()
+                return {}
         finally:
             db.close()
     except Exception as e:
-        logger.debug(f"Не удалось прочитать SystemSetting из БД: {e}")
+        logger.warning(f"Не удалось подключиться к БД для чтения SystemSetting: {e}")
         return {}
 
 

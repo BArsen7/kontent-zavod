@@ -146,20 +146,91 @@ def _migrate_block_fields(conn) -> None:
 
 
 def init_db():
-    """Инициализация базы данных: миграции и создание всех таблиц."""
+    """Инициализация базы данных: миграции и создание всех таблиц.
+
+    FIX: идемпотентность — метод вызывается и из lifespan FastAPI, и напрямую
+    при запуске планировщика/скриптов; повторный вызов не должен ронять приложение.
+    """
     # Импортируем ВСЕ модели здесь, чтобы избежать циклических импортов
     # и чтобы create_all создал недостающие таблицы (например, users по новой схеме).
     import models  # noqa: F401
 
-    with engine.begin() as conn:
-        _migrate_users_table(conn)
-        _migrate_content_plan_periods_table(conn)
-        _migrate_users_is_admin(conn)
+    try:
+        with engine.begin() as conn:
+            _migrate_users_table(conn)
+            _migrate_content_plan_periods_table(conn)
+            _migrate_users_is_admin(conn)
+    except Exception as e:  # noqa: BLE401 — миграция не должна ронять приложение
+        print(f"[migration] Пропущен этап пред-миграций: {type(e).__name__}: {e}")
 
-    Base.metadata.create_all(bind=engine)
+    # FIX: checkfirst=True (дефолт) не спасает, если в БД есть таблицы со СТАРЫМИ
+    # схемами (например, system_settings без колонки updated_at) — SQLite тогда
+    # падает с OperationalError «no such column», и приложение не стартует.
+    # Поэтому создаём таблицы по одной: проблемную таблицу пропускаем с логом,
+    # остальные гарантированно будут созданы.
+    from sqlalchemy.exc import OperationalError, ProgrammingError
 
-    # Новые колонки добавляем ПОСЛЕ create_all: к этому моменту все таблицы
-    # точно существуют (созданы или уже были), а create_all не трогает
+    for table in Base.metadata.sorted_tables:
+        try:
+            table.create(bind=engine, checkfirst=True)
+        except (OperationalError, ProgrammingError) as e:
+            print(
+                f"[migration] ВНИМАНИЕ: таблица '{table.name}' не проверена/не создана "
+                f"из-за расхождения схемы со старой БД: {type(e).__name__}: {e}. "
+                "Если приложение использует эту таблицу — сделайте резервную копию "
+                "data/autopilot.db и удалите таблицу для пересоздания."
+            )
+
+    # Новые колонки добавляем ПОСЛЕ создания таблиц: к этому моменту все таблицы
+    # точно существуют (созданы или уже были), а table.create(checkfirst) не трогает
     # существующие таблицы с устаревшей схемой.
-    with engine.begin() as conn:
-        _migrate_block_fields(conn)
+    try:
+        with engine.begin() as conn:
+            _migrate_block_fields(conn)
+    except Exception as e:  # noqa: BLE001 — миграция не должна ронять приложение
+        print(f"[migration] Этап миграции блокировок пропущен: {type(e).__name__}: {e}")
+
+    # FIX (падение /admin/settings, «no such table: system_settings»):
+    # если таблица system_settings в старой БД создана по устаревшей схеме
+    # (например, без обязательной колонки updated_at) — пересоздаём её.
+    # Таблица хранит только настройки AI (легко восстанавливаются из админки),
+    # но при отсутствии ai_provider генераторы деградируют до локальной Ollama.
+    _repair_system_settings_table()
+
+
+def _repair_system_settings_table() -> None:
+    """Пересоздаёт таблицу system_settings, если она отсутствует или имеет
+    неполную/устаревшую схему (не хватает колонок key/value/updated_at).
+
+    Данные настроек при этом теряются — они будут восстановлены пользователем
+    через страницу «Настройки AI» (или fallback из config.py). Это безопаснее,
+    чем молчаливое падение всех роутов настроек и выбор локальной модели
+    вместо указанной в админ-панели GigaChat.
+    """
+    from sqlalchemy import inspect, text
+
+    try:
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        need_repair = False
+        if "system_settings" not in tables:
+            # create_all уже должен был её создать; если нет — создаём явно.
+            models_table = Base.metadata.tables.get("system_settings")
+            if models_table is not None:
+                models_table.create(bind=engine, checkfirst=True)
+            return
+        cols = {c["name"] for c in inspector.get_columns("system_settings")}
+        if not {"key", "value", "updated_at"} <= cols:
+            need_repair = True
+
+        if need_repair:
+            with engine.begin() as conn:
+                conn.execute(text("DROP TABLE system_settings"))
+                Base.metadata.tables["system_settings"].create(bind=engine)
+            print(
+                "[migration] Таблица system_settings имела неполную схему "
+                f"(колонки: {sorted(cols)}) — пересоздана заново. Настройки AI "
+                "нужно задать повторно на странице /admin/settings."
+            )
+    except Exception as e:  # noqa: BLE001 — миграция не должна ронять приложение
+        print(f"[migration] Не удалось проверить/пересоздать system_settings: {type(e).__name__}: {e}")
