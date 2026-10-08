@@ -3,12 +3,33 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 
-from models import ContentPlan, Post
+from models import ContentPlan, Post, SystemSetting
 from generators.text_generator import generate_text
-from generators.image_generator import generate_kandinsky
+from generators.image_generator import generate_image
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _default_use_local(db: Session) -> bool:
+    """True — локальный Ollama; False — облачный провайдер (cloud/gigachat)."""
+    try:
+        row = db.query(SystemSetting).filter(SystemSetting.key == "ai_provider").first()
+        provider = (row.value or "").strip().lower() if row else "ollama"
+        return provider not in ("cloud", "gigachat")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"Не удалось прочитать ai_provider: {e}")
+        return True
+
+
+
+def _image_source_name(path: str) -> str:
+    """Определяет источник изображения по имени файла для поля Post.image_source."""
+    name = (path or "").lower()
+    if ".jpg" in name:
+        return "gigachat"
+    return "kandinsky"
+
 
 # Системные промпты для разных типов постов
 SYSTEM_PROMPTS = {
@@ -154,10 +175,12 @@ def generate_weekly_pack(
             
             # Генерируем текст
             logger.info("Генерация текста...")
+            # Провайдер выбирается по системной настройке ai_provider
+            # (ollama | cloud | gigachat); fallback — локальная Ollama.
             text_content = generate_text(
                 prompt=full_user_prompt,
                 system_prompt=system_prompt,
-                use_local=True  # По умолчанию используем локальную Ollama
+                use_local=_default_use_local(db)
             )
             
             # Генерируем изображение
@@ -165,12 +188,9 @@ def generate_weekly_pack(
             image_prompt = f"Cozy baking scene, homemade cookies with detailed relief pattern, {post_type} theme, warm lighting, photorealistic, 4k"
             
             try:
-                image_path = generate_kandinsky(
-                    prompt=image_prompt,
-                    api_key=settings.effective_gigachat_client_id,
-                    secret_key=settings.effective_gigachat_client_secret,
-                    save_dir="data/media"
-                )
+                # Провайдер выбирается автоматически (SystemSetting image_provider):
+                # GigaChat Premium (нативная генерация) или Kandinsky
+                image_path = generate_image(prompt=image_prompt, save_dir="data/media")
                 logger.info(f"Изображение сохранено: {image_path}")
             except Exception as img_err:
                 logger.error(f"Ошибка генерации изображения: {img_err}. Продолжаем без картинки.")
@@ -184,7 +204,7 @@ def generate_weekly_pack(
                 text_draft=text_content,
                 text_final=text_content, # Изначально черновик = финал
                 image_url=image_path, # Локальный путь
-                image_source="kandinsky" if image_path else None,
+                image_source=_image_source_name(image_path) if image_path else None,
                 status="draft",
                 publish_at=now + timedelta(days=(i * days) // num_posts), # Примерное время публикации
                 published_at=None

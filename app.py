@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
     scheduler_thread = threading.Thread(target=start_scheduler, name="SchedulerStartup", daemon=True)
     scheduler_thread.start()
     
-    # Инициализируем синглтон асинхронного клиента GigaChat (токен будет
+    # Инициализируем синглтон клиента GigaChat (requests; токен OAuth будет
     # получен лениво при первом запросе и закэширован внутри экземпляра)
     from services.gigachat_client import get_gigachat_client, is_gigachat_configured
 
@@ -605,7 +605,8 @@ AI_SETTING_KEYS = {
     # Значения по умолчанию берутся из config.py (.env), в БД можно переопределить
     "gigachat_text_model": lambda: settings.gigachat_text_model,
     "gigachat_image_model": lambda: settings.gigachat_image_model,
-    "image_provider": lambda: "kandinsky",  # kandinsky | gigachat
+    # kandinsky | gigachat (по умолчанию — нативная генерация GigaChat Premium)
+    "image_provider": lambda: "gigachat" if is_gigachat_configured() else "kandinsky",
 }
 
 
@@ -658,6 +659,7 @@ def build_ai_config(db: Session) -> Dict[str, Any]:
         # GigaChat Premium
         "gigachat_text_model": get_system_setting(db, "gigachat_text_model"),
         "gigachat_image_model": get_system_setting(db, "gigachat_image_model"),
+        "gigachat_image_save_dir": get_system_setting(db, "gigachat_image_save_dir"),
         "image_provider": get_system_setting(db, "image_provider"),
         "gigachat_configured": is_gigachat_configured(),
     }
@@ -704,7 +706,8 @@ def admin_settings_update(
     cloud_text_model: str = Form(""),
     gigachat_text_model: str = Form(""),
     gigachat_image_model: str = Form(""),
-    image_provider: str = Form("kandinsky"),
+    gigachat_image_save_dir: str = Form(""),
+    image_provider: str = Form("gigachat"),
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
@@ -733,6 +736,7 @@ def admin_settings_update(
         "cloud_text_model": cloud_text_model.strip(),
         "gigachat_text_model": gigachat_text_model.strip(),
         "gigachat_image_model": gigachat_image_model.strip(),
+        "gigachat_image_save_dir": gigachat_image_save_dir.strip() or "data/media",
         "image_provider": image_provider,
     }
     # Валидация температуры
@@ -784,14 +788,15 @@ def admin_settings_update(
 
 
 @app.post("/admin/settings/test-cloud")
-def admin_settings_test_cloud(
+async def admin_settings_test_cloud(
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
     """Проверяет подключение к облачной модели: POST {base_url}/chat/completions.
 
-    Для провайдера 'gigachat' использует полноценный асинхронный
-    GigaChatClient (OAuth + повтор при 401).
+    Для провайдера 'gigachat' использует полноценный GigaChatClient
+    (OAuth с кэшированием токена + повтор при 401). Синхронные сетевые
+    вызовы вынесены в поток (asyncio.to_thread), чтобы не блокировать event loop.
     """
     cfg = build_ai_config(db)
 
@@ -808,18 +813,17 @@ def admin_settings_test_cloud(
                 },
                 status_code=400,
             )
-        from services.gigachat_client import get_gigachat_client, run_sync
+        from services.gigachat_client import get_gigachat_client
 
         client = get_gigachat_client()
         try:
-            reply = run_sync(
-                client.generate_text(
-                    prompt="ping",
-                    system_prompt="",
-                    temperature=cfg["generation_temperature"],
-                    max_tokens=5,
-                    model=(cfg["gigachat_text_model"] or "").strip() or None,
-                )
+            reply = await asyncio.to_thread(
+                client.generate_text,
+                prompt="ping",
+                system_prompt="",
+                temperature=cfg["generation_temperature"],
+                max_tokens=5,
+                model=(cfg["gigachat_text_model"] or "").strip() or None,
             )
             logger.info(f"[admin] {admin.email}: тест GigaChat успешен")
             return JSONResponse({"ok": True, "reply": (reply or "(пустой ответ)")[:200]})
@@ -863,6 +867,49 @@ def admin_settings_test_cloud(
         return JSONResponse({"ok": True, "reply": reply[:200]})
     except Exception as e:  # noqa: BLE001 — показываем админу суть ошибки
         logger.warning(f"[admin] {admin.email}: тест облачной моделине удался: {e}")
+        return JSONResponse({"ok": False, "detail": str(e)[:300]}, status_code=400)
+
+
+@app.post("/admin/settings/test-gigachat-image")
+async def admin_settings_test_gigachat_image(
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Тест нативной генерации изображения через GigaChat Premium.
+
+    Делает реальный (дорогой по времени) запрос: chat/completions c
+    function_call="auto" (таймаут 90 сек) + скачивание /files/{id}/content
+    (30 сек). Синхронные сетевые вызовы вынесены в поток через
+    asyncio.to_thread — event loop FastAPI не блокируется.
+    """
+    if not is_gigachat_configured():
+        return JSONResponse(
+            {
+                "ok": False,
+                "detail": (
+                    "GigaChat credentials не заданы в .env "
+                    "(GIGACHAT_CLIENT_ID / GIGACHAT_CLIENT_SECRET)"
+                ),
+            },
+            status_code=400,
+        )
+
+    cfg = build_ai_config(db)
+    save_dir = (cfg.get("gigachat_image_save_dir") or "").strip() or "data/media"
+
+    from generators.image_generator import generate_image_gigachat
+
+    try:
+        path = await asyncio.to_thread(
+            generate_image_gigachat,
+            "Уютная кухня, печенье с цветным рельефным узором, мягкий свет",
+            save_dir,
+            cfg.get("gigachat_text_model", ""),
+        )
+        logger.info(f"[admin] {admin.email}: тест генерации изображения GigaChat успешен: {path}")
+        return JSONResponse({"ok": True, "path": path})
+    except Exception as e:  # noqa: BLE001 — показываем админу суть ошибки
+        logger.warning(f"[admin] {admin.email}: тест изображения GigaChat не удался: {e}")
         return JSONResponse({"ok": False, "detail": str(e)[:300]}, status_code=400)
 
 

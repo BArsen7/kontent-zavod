@@ -140,9 +140,9 @@
                 </label>
                 <label class="inline-flex items-center text-sm font-medium text-gray-700">
                     <input type="radio" name="image_provider" value="gigachat"
-                           {% if values.image_provider == 'gigachat' %}checked{% endif %}
+                           {% if values.image_provider != 'kandinsky' %}checked{% endif %}
                            onclick="toggleImageProvider()" class="mr-2">
-                        🟢 GigaChat (/images/generations)
+                        🟢 GigaChat (нативная генерация: function_call + /files)
                 </label>
             </div>
         </div>
@@ -154,9 +154,19 @@
                        placeholder="GigaChat"
                        class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
                 <p class="text-xs text-gray-400 mt-1">
-                    Fallback: GIGACHAT_IMAGE_MODEL из .env. Ответ <code>url</code> скачивается и сохраняется
-                    локально; <code>b64_json</code> декодируется в <code>static/uploads/</code>.
+                    Нативная генерация изображений моделью: запрос
+                    <code>/chat/completions</code> с <code>"function_call": "auto"</code>,
+                    ответ вида <code>&lt;img src="file_id" fuse="true"/&gt;</code>, затем скачивание
+                    <code>/files/{file_id}/content</code> (JPG). Авторизация — общий OAuth-токен из кэша.
                 </p>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Папка сохранения изображений</label>
+                <input type="text" name="gigachat_image_save_dir" value="{{ values.gigachat_image_save_dir }}"
+                       placeholder="data/media"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <p class="text-xs text-gray-400 mt-1">Создаётся автоматически. Файлы сохраняются как <code>&lt;uuid&gt;.jpg</code>.</p>
             </div>
         </div>
 
@@ -191,10 +201,20 @@
     <p class="text-sm text-gray-500 mb-4">
         Тест использует <b>сохранённые</b> значения из БД. Сначала сохраните настройки, затем нажмите кнопку.
     </p>
-    <button type="button" id="btn-test-cloud" onclick="testCloud()"
-            class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-6 rounded-md transition duration-200">
-        ⚡ Проверить подключение
-    </button>
+    <div class="flex flex-wrap gap-4">
+        <button type="button" id="btn-test-cloud" onclick="testCloud()"
+                class="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-6 rounded-md transition duration-200">
+            ⚡ Проверить подключение (текст)
+        </button>
+        <button type="button" id="btn-test-image" onclick="testGigaChatImage()"
+                class="bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2 px-6 rounded-md transition duration-200">
+            🖼️ Сгенерировать тестовое изображение (GigaChat)
+        </button>
+    </div>
+    <p class="text-xs text-gray-400 mt-2">
+        Тест изображений делает реальный запрос к GigaChat (до ~2 минут: 90 сек на генерацию
+        модели + 30 сек на скачивание файла) и сохраняет JPG в папку сохранения.
+    </p>
     <div id="test-result" class="mt-4 hidden text-sm rounded-md px-4 py-3"></div>
 </div>
 
@@ -206,6 +226,45 @@
         document.getElementById('ollama-section').classList.toggle('hidden', provider !== 'ollama');
         document.getElementById('gigachat-section').classList.toggle('hidden', provider !== 'gigachat');
         document.getElementById('cloud-section').classList.toggle('hidden', provider !== 'cloud');
+    }
+
+    function toggleImageProvider() {
+        const radios = document.getElementsByName('image_provider');
+        let provider = 'gigachat';
+        for (const r of radios) { if (r.checked) { provider = r.value; break; } }
+        document.getElementById('gc-image-section').classList.toggle('hidden', provider !== 'gigachat');
+    }
+
+    // Инициализация видимости секций при загрузке страницы
+    document.addEventListener('DOMContentLoaded', () => {
+        toggleProvider();
+        toggleImageProvider();
+    });
+
+    function testGigaChatImage() {
+        const box = document.getElementById('test-result');
+        const btn = document.getElementById('btn-test-image');
+        box.classList.remove('hidden', 'bg-green-100', 'bg-red-100');
+        box.textContent = 'Генерирую тестовое изображение… (может занять до 2 минут)';
+        btn.disabled = true;
+        fetch('/admin/settings/test-gigachat-image', { method: 'POST' })
+            .then(r => r.json().then(j => ({ status: r.status, body: j })))
+            .then(({ status, body }) => {
+                btn.disabled = false;
+                if (status === 200 && body.ok) {
+                    box.classList.add('bg-green-100');
+                    box.innerHTML = '✅ Изображение сохранено: <b>' + (body.path || '') + '</b>';
+                } else {
+                    btn.disabled = false;
+                    box.classList.add('bg-red-100');
+                    box.innerHTML = '❌ Ошибка: ' + (body.detail || 'неизвестная ошибка');
+                }
+            })
+            .catch(err => {
+                btn.disabled = false;
+                box.classList.add('bg-red-100');
+                box.textContent = '❌ Сетевая ошибка: ' + err;
+            });
     }
 
     function toggleImageProvider() {

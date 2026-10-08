@@ -80,9 +80,10 @@ def generate_text_gigachat(
     """
     Генерация текста через облачный GigaChat API (тариф Premium).
 
-    Делегирует запрос асинхронному GigaChatClient (services/gigachat_client.py):
-    OAuth-токен получается один раз и кэшируется в памяти клиента,
-    модель настраивается через .env (GIGACHAT_TEXT_MODEL: GigaChat-Pro / GigaChat-Max).
+    Делегирует запрос синхронному GigaChatClient (services/gigachat_client.py,
+    requests): OAuth-токен получается один раз и кэшируется в памяти клиента,
+    модель настраивается через .env (GIGACHAT_TEXT_MODEL: GigaChat-Pro / GigaChat-Max),
+    проверка SSL — через GIGACHAT_VERIFY_SSL.
 
     Args:
         prompt: Пользовательский запрос.
@@ -101,22 +102,30 @@ def generate_text_gigachat(
             "(GIGACHAT_CLIENT_ID / GIGACHAT_CLIENT_SECRET)"
         )
 
-    from services.gigachat_client import get_gigachat_client, run_sync
+    from services.gigachat_client import get_gigachat_client
 
-    client = get_gigachat_client()
+    # Общий синглтон клиента: креды и verify_ssl берутся из config.py
+    # (settings.gigachat_key/secret -> effective_*, settings.gigachat_verify_ssl),
+    # OAuth-токен кэшируется на уровне процесса и переиспользуется между
+    # текстовыми и графическими генерациями без повторных запросов /oauth.
+    client = get_gigachat_client(
+        client_id=settings.effective_gigachat_client_id,
+        client_secret=settings.effective_gigachat_client_secret,
+        verify_ssl=settings.gigachat_verify_ssl,
+    )
     try:
-        return run_sync(
-            client.generate_text(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                temperature=temperature,
-            )
+        return client.generate_text(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
         )
-    except TimeoutError:
+    except RuntimeError as e:
+        # GigaChatAuthError / GigaChatAPIError (наследники RuntimeError):
+        # детальные причины (401/429/5xx, неверный scope) уже залогированы в клиенте
+        logger.error(f"Ошибка генерации текста через GigaChat: {e}")
         raise
     except Exception as e:
-        # Детальные причины (401/429/5xx, неверный scope) уже залогированы в клиенте
-        logger.error(f"Ошибка генерации текста через GigaChat: {e}")
+        logger.error(f"Неизвестная ошибка генерации текста через GigaChat: {e}")
         raise RuntimeError(f"Ошибка генерации текста через GigaChat: {e}")
 
 
@@ -269,17 +278,15 @@ def generate_text(
         # Полноценная интеграция GigaChat Premium: имя модели можно переопределить
         # из админки (ключ gigachat_text_model), иначе берётся из config.py
         logger.info("Используется облачная генерация (GigaChat Premium)")
-        from services.gigachat_client import get_gigachat_client, run_sync
+        from services.gigachat_client import get_gigachat_client
 
         client = get_gigachat_client()
         gc_model = (cfg.get("gigachat_text_model") or "").strip() or None
-        return run_sync(
-            client.generate_text(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                temperature=temp,
-                model=gc_model,
-            )
+        return client.generate_text(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temp,
+            model=gc_model,
         )
 
     if provider == "ollama":

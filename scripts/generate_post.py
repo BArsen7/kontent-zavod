@@ -24,7 +24,7 @@ from config import settings
 from database import init_db, SessionLocal
 from models import Post
 from generators.text_generator import generate_text
-from generators.image_generator import generate_kandinsky
+from generators.image_generator import generate_image
 
 # Настройка логирования
 logging.basicConfig(
@@ -146,12 +146,9 @@ def main():
         image_path = None
         
         try:
-            image_path = generate_kandinsky(
-                prompt=image_prompt,
-                api_key=settings.effective_gigachat_client_id,
-                secret_key=settings.effective_gigachat_client_secret,
-                save_dir="data/media"
-            )
+            # Провайдер выбирается автоматически (SystemSetting image_provider):
+            # GigaChat Premium (нативная генерация) или Kandinsky
+            image_path = generate_image(prompt=image_prompt, save_dir="data/media")
             logger.info(f"Изображение сохранено: {image_path}")
         except Exception as e:
             logger.warning(f"Ошибка генерации изображения: {e}. Продолжаем без картинки.")
@@ -164,7 +161,7 @@ def main():
             text_draft=text_content,
             text_final=text_content,
             image_url=image_path,
-            image_source="kandinsky" if image_path else None,
+            image_source=("gigachat" if image_path.lower().endswith(".jpg") else "kandinsky") if image_path else None,
             status="draft",
             publish_at=datetime.now(),
             published_at=None

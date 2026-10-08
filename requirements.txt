@@ -14,11 +14,12 @@ python-dotenv
 # --- Database (SQLite) ---
 sqlalchemy
 
-# --- HTTP clients ---
-# requests: синхронные вызовы (Ollama, старые скрипты)
-# httpx: асинхронный клиент GigaChat API (services/gigachat_client.py)
+# --- HTTP client ---
+# requests: все сетевые вызовы проекта (Ollama, Kandinsky/FusionBrain,
+# облачные OpenAI-совместимые API и синхронный клиент GigaChat API
+# services/gigachat_client.py). httpx НЕ требуется.
 requests
-httpx>=0.24
+urllib3
 
 # --- Background scheduler ---
 apscheduler
