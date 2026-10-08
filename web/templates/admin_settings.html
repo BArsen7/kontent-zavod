@@ -134,13 +134,13 @@
             <div class="flex flex-wrap gap-4">
                 <label class="inline-flex items-center text-sm font-medium text-gray-700">
                     <input type="radio" name="image_provider" value="kandinsky"
-                           {% if values.image_provider != 'gigachat' %}checked{% endif %}
+                           {% if values.image_provider == 'kandinsky' or not values.image_provider %}checked{% endif %}
                            onclick="toggleImageProvider()" class="mr-2">
                         🎨 Kandinsky (FusionBrain)
                 </label>
                 <label class="inline-flex items-center text-sm font-medium text-gray-700">
                     <input type="radio" name="image_provider" value="gigachat"
-                           {% if values.image_provider != 'kandinsky' %}checked{% endif %}
+                           {% if values.image_provider == 'gigachat' %}checked{% endif %}
                            onclick="toggleImageProvider()" class="mr-2">
                         🟢 GigaChat (нативная генерация: function_call + /files)
                 </label>
@@ -230,7 +230,7 @@
 
     function toggleImageProvider() {
         const radios = document.getElementsByName('image_provider');
-        let provider = 'gigachat';
+        let provider = 'kandinsky';
         for (const r of radios) { if (r.checked) { provider = r.value; break; } }
         document.getElementById('gc-image-section').classList.toggle('hidden', provider !== 'gigachat');
     }
@@ -266,19 +266,6 @@
                 box.textContent = '❌ Сетевая ошибка: ' + err;
             });
     }
-
-    function toggleImageProvider() {
-        const radios = document.getElementsByName('image_provider');
-        let provider = 'kandinsky';
-        for (const r of radios) { if (r.checked) { provider = r.value; break; } }
-        document.getElementById('gc-image-section').classList.toggle('hidden', provider !== 'gigachat');
-    }
-
-    // Инициализация видимости секций при загрузке страницы
-    document.addEventListener('DOMContentLoaded', () => {
-        toggleProvider();
-        toggleImageProvider();
-    });
 
     function testCloud() {
         const box = document.getElementById('test-result');
