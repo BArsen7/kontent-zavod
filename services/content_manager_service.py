@@ -22,7 +22,17 @@ def _default_use_local(db: Session) -> bool:
         provider = (row.value or "").strip().lower() if row else "ollama"
         return provider not in ("cloud", "gigachat")
     except Exception as e:  # noqa: BLE001
-        logger.debug(f"Не удалось прочитать ai_provider: {e}")
+        # FIX: таблица system_settings может отсутствовать в старой БД
+        # («no such table») — сессию нужно откачать, иначе все последующие
+        # запросы в этой сессии будут падать, а генерация деградирует до Ollama.
+        logger.warning(
+            f"Не удалось прочитать ai_provider ({type(e).__name__}: {e}) — "
+            "fallback на локальную модель. Проверьте миграции при старте приложения."
+        )
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001
+            pass
         return True
 
 

@@ -10,6 +10,7 @@ import vk_api
 import bcrypt as _bcrypt
 
 from sqlalchemy import func as sa_func, or_  # FIX: or_ — фильтр своих постов в /api/posts
+from sqlalchemy.exc import OperationalError  # FIX: устойчивое чтение SystemSetting (fallback при битой таблице)
 
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Form, Query
 from fastapi.concurrency import run_in_threadpool  # FIX: Event loop unblocked
@@ -611,10 +612,22 @@ AI_SETTING_KEYS = {
 
 
 def get_system_setting(db: Session, key: str) -> str:
-    """Читает настройку из SystemSetting; при отсутствии — fallback из config.py."""
-    row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
-    if row is not None:
-        return row.value
+    """Читает настройку из SystemSetting; при отсутствии — fallback из config.py.
+
+    FIX: если таблица system_settings отсутствует/недоступна в старой БД
+    (OperationalError «no such table»), не роняем роут (/admin/settings,
+    сохранение настроек, тесты подключения), а отдаём fallback-значение.
+    init_db() пересоздаст таблицу при следующем старте приложения.
+    """
+    try:
+        row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+        if row is not None:
+            return row.value
+    except OperationalError as e:
+        db.rollback()  # сессия после ошибки БД должна быть откачена
+        logger.warning(
+            f"Таблица system_settings недоступна ({e}) — используется fallback из config.py"
+        )
     fallback = AI_SETTING_KEYS.get(key)
     return fallback() if fallback else ""
 
@@ -1347,12 +1360,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         f"errors={exc.errors()}, raw_body={body_text!r}"
     )
     # Приводим detail к плоскому списку строк, чтобы клиент не получал "[object Object]"
+    # FIX: msg может быть bytes (например "JSON decode error") — приводим к str.
     detail = [
-        {
-            "loc": [str(part) for part in err.get("loc", [])],
-            "msg": err.get("msg", ""),
-            "type": err.get("type", ""),
-        }
+        f"{'.'.join(str(part) for part in err.get('loc', []))}: {err.get('msg', '')!s}"
         for err in exc.errors()
     ]
     return JSONResponse(status_code=422, content={"detail": detail})
@@ -1766,10 +1776,31 @@ def get_chat_messages(  # FIX: Event loop unblocked — синхронный р�
 async def send_chat_message(
     period_id: int,
     request: Request,
-    message: str,
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Отправляет сообщение в чат с контент-менеджером и получает ответ ИИ."""
+    """Отправляет сообщение в чат с контент-менеджером и получает ответ ИИ.
+
+    FIX: сообщение принимается из JSON-тела {"message": "..."} (так отправляет
+    фронтенд content_manager.html), а не из query-параметра — раньше FastAPI
+    искал message в query и возвращал 422 «Field required».
+    """
+    # Читаем тело: основной вариант — JSON; fallback — form-data/urlencoded.
+    message = ""
+    try:
+        body = await request.json()
+        if isinstance(body, dict):
+            message = str(body.get("message", "")).strip()
+    except Exception:  # noqa: BLE001 — не JSON: пробуем форму
+        pass
+    if not message:
+        try:
+            form = await request.form()
+            message = str(form.get("message", "")).strip()
+        except Exception:  # noqa: BLE001
+            pass
+    if not message:
+        raise HTTPException(status_code=400, detail="Поле 'message' обязательно и не может быть пустым")
+
     user = require_auth(request, db)
     
     # Проверяем что период принадлежит пользователю
