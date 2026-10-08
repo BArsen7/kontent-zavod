@@ -6,6 +6,7 @@ from pathlib import Path
 import requests
 
 from config import settings
+from services.gigachat_client import is_gigachat_configured
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ def _get_gigachat_token() -> str:
     """
     auth_url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
     
-    if not settings.gigachat_key or not settings.gigachat_secret:
+    if not settings.effective_gigachat_client_id or not settings.effective_gigachat_client_secret:
         raise RuntimeError("GigaChat credentials не настроены в .env файле")
     
     logger.info("Получение токена авторизации для Kandinsky через GigaChat")
@@ -38,9 +39,9 @@ def _get_gigachat_token() -> str:
                 "RqUID": str(uuid.uuid4())
             },
             data={
-                "scope": "GIGACHAT_API_PERS",
-                "client_id": settings.gigachat_key,
-                "client_secret": settings.gigachat_secret
+                "scope": settings.gigachat_scope,
+                "client_id": settings.effective_gigachat_client_id,
+                "client_secret": settings.effective_gigachat_client_secret
             },
             timeout=30
         )
@@ -58,6 +59,61 @@ def _get_gigachat_token() -> str:
     except requests.exceptions.RequestException as e:
         logger.error(f"Ошибка при получении токена: {e}")
         raise RuntimeError(f"Ошибка авторизации для Kandinsky: {e}")
+
+
+def generate_gigachat_image(
+    prompt: str,
+    save_dir: str = "static/uploads",
+    size: str = "1024x1024",
+) -> str:
+    """
+    Генерация изображения через облачной GigaChat API (POST /images/generations).
+
+    Если API вернул url — скачиваем его и сохраняем локально (посты в VK
+    требуют путь к файлу); если вернул b64_json — клиент сам сохраняет файл.
+
+    Args:
+        prompt: Текстовое описание изображения.
+        save_dir: Директория для сохранения изображений.
+        size: Размер изображения (например "1024x1024").
+
+    Returns:
+        Локальный путь к сохранённому файлу.
+
+    Raises:
+        RuntimeError: Если креды не настроены или генерация не удалась.
+    """
+    if not is_gigachat_configured():
+        raise RuntimeError(
+            "GigaChat credentials не настроены в .env файле "
+            "(GIGACHAT_CLIENT_ID / GIGACHAT_CLIENT_SECRET)"
+        )
+
+    from services.gigachat_client import get_gigachat_client, run_sync
+
+    client = get_gigachat_client()
+    result = run_sync(client.generate_image(prompt=prompt, size=size))
+
+    # Результат может быть внешним URL (response_format=url) — скачиваем локально
+    if result.startswith("http://") or result.startswith("https://"):
+        try:
+            resp = requests.get(result, timeout=60)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Не удалось скачать изображение из GigaChat ({result}): {e}")
+            raise RuntimeError(f"Ошибка скачивания изображения GigaChat: {e}")
+
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        filename = f"{uuid.uuid4().hex}.png"
+        file_path = save_path / filename
+        file_path.write_bytes(resp.content)
+        rel_path = str(file_path)
+        logger.info(f"Изображение GigaChat сохранено: {rel_path}")
+        return rel_path
+
+    logger.info(f"Изображение GigaChat готово: {result}")
+    return result
 
 
 def generate_kandinsky(
@@ -202,3 +258,69 @@ def generate_kandinsky(
     # Если цикл завершился, а статус так и не стал DONE
     logger.error(f"Превышено максимальное время ожидания генерации ({max_attempts * poll_interval} сек)")
     raise TimeoutError(f"Превышено время ожидания генерации изображения ({max_attempts * poll_interval} секунд)")
+
+
+def _load_dynamic_image_config() -> dict:
+    """Читает настройки изображений из SystemSetting (без импорта app.py)."""
+    try:
+        from database import SessionLocal
+        from models import SystemSetting
+
+        db = SessionLocal()
+        try:
+            rows = db.query(SystemSetting).all()
+            return {r.key: r.value for r in rows}
+        finally:
+            db.close()
+    except Exception as e:
+        logger.debug(f"Не удалось прочитать SystemSetting из БД: {e}")
+        return {}
+
+
+def generate_image(
+    prompt: str,
+    save_dir: str = "data/media",
+    size: str = "1024x1024",
+) -> str:
+    """
+    Единая точка входа генерации изображений с выбором провайдера.
+
+    Провайдер берётся из таблицы SystemSetting (ключ image_provider):
+      - "gigachat"  -> облачный GigaChat API (POST /images/generations),
+                       основной метод; креды — из .env / config.py;
+      - "kandinsky" -> Kandinsky (FusionBrain API);
+      - пусто/неизвестно -> обратная совместимость: Kandinsky.
+
+    Args:
+        prompt: Текстовое описание изображения.
+        save_dir: Директория для сохранения изображений.
+        size: Размер изображения (для GigaChat, например "1024x1024").
+
+    Returns:
+        Локальный путь к сохранённому файлу.
+    """
+    cfg = _load_dynamic_image_config()
+    provider = (cfg.get("image_provider") or "").strip().lower()
+
+    if provider == "gigachat":
+        logger.info("Генерация изображения через GigaChat (настройка из админ-панели)")
+        gc_size = (cfg.get("gigachat_image_size") or size).strip() or size
+        return generate_gigachat_image(prompt=prompt, save_dir=save_dir, size=gc_size)
+
+    if provider == "kandinsky":
+        logger.info("Генерация изображения через Kandinsky (настройка из админ-панели)")
+        return generate_kandinsky(
+            prompt=prompt,
+            api_key=settings.effective_gigachat_client_id,
+            secret_key=settings.effective_gigachat_client_secret,
+            save_dir=save_dir,
+        )
+
+    # Fallback: историческое поведение — Kandinsky
+    logger.info("Генерация изображения через Kandinsky (провайдер по умолчанию)")
+    return generate_kandinsky(
+        prompt=prompt,
+        api_key=settings.effective_gigachat_client_id,
+        secret_key=settings.effective_gigachat_client_secret,
+        save_dir=save_dir,
+    )

@@ -15,24 +15,38 @@
         <!-- Выбор провайдера -->
         <div>
             <label class="block text-sm font-medium text-gray-600 mb-2">Провайдер генерации текста</label>
-            <div class="flex gap-4">
+            <div class="flex flex-wrap gap-4">
                 <label class="inline-flex items-center text-sm font-medium text-gray-700">
                     <input type="radio" name="ai_provider" value="ollama"
-                           {% if values.ai_provider != 'cloud' %}checked{% endif %}
-                           onclick="toggleCloud(true)" class="mr-2">
+                           {% if values.ai_provider not in ['cloud', 'gigachat'] %}checked{% endif %}
+                           onclick="toggleProvider()" class="mr-2">
                         🖥️ Локальный Ollama
+                </label>
+                <label class="inline-flex items-center text-sm font-medium text-gray-700">
+                    <input type="radio" name="ai_provider" value="gigachat"
+                           {% if values.ai_provider == 'gigachat' %}checked{% endif %}
+                           onclick="toggleProvider()" class="mr-2">
+                        🟢 GigaChat (Premium API)
                 </label>
                 <label class="inline-flex items-center text-sm font-medium text-gray-700">
                     <input type="radio" name="ai_provider" value="cloud"
                            {% if values.ai_provider == 'cloud' %}checked{% endif %}
-                           onclick="toggleCloud(false)" class="mr-2">
+                           onclick="toggleProvider()" class="mr-2">
                         ☁️ Облачная модель (OpenAI-совместимый API)
                 </label>
             </div>
             <p class="text-xs text-gray-400 mt-1">
-                Подойдёт любой API с совместимым <code>/chat/completions</code>: OpenRouter, OpenAI,
-                DeepSeek, GigaChat (через прокси), YandexGPT и т.д.
+                GigaChat — полноценная интеграция (OAuth + /chat/completions), креды берутся из
+                <code>.env</code> (GIGACHAT_CLIENT_ID / GIGACHAT_CLIENT_SECRET).
+                Для OpenAI-совместимого API подойдёт любой сервис с эндпоинтом <code>/chat/completions</code>:
+                OpenRouter, OpenAI, DeepSeek, YandexGPT и т.д.
             </p>
+            {% if not gigachat_configured %}
+            <p class="text-xs text-red-600 mt-2 bg-red-50 rounded px-3 py-2">
+                ⚠️ Креды GigaChat не найдены в .env — выбор провайдера «GigaChat» сохранится только
+                после настройки GIGACHAT_CLIENT_ID / GIGACHAT_CLIENT_SECRET и перезапуска приложения.
+            </p>
+            {% endif %}
         </div>
 
         <hr class="border-gray-200">
@@ -54,6 +68,31 @@
                        placeholder="qwen2.5:14b"
                        class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
                 <p class="text-xs text-gray-400 mt-1">Используется генератором текста (Ollama /api/generate)</p>
+            </div>
+        </div>
+
+        <!-- Секция: GigaChat Premium -->
+        <div id="gigachat-section" class="space-y-5 {% if values.ai_provider != 'gigachat' %}hidden{% endif %}">
+            <h2 class="text-lg font-semibold text-gray-800">🟢 GigaChat (тариф Premium)</h2>
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Модель для текста (GigaChat)</label>
+                <input type="text" name="gigachat_text_model" value="{{ values.gigachat_text_model }}"
+                       placeholder="GigaChat-Pro"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <p class="text-xs text-gray-400 mt-1">
+                    Для Premium-тарифа доступны <code>GigaChat-Pro</code> и <code>GigaChat-Max</code>.
+                    Fallback: GIGACHAT_TEXT_MODEL из .env.
+                </p>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Client ID (только чтение)</label>
+                <input type="text" value="{{ gigachat_client_id_masked }}" disabled
+                       class="w-full border border-gray-200 bg-gray-50 rounded-md px-3 py-2 text-gray-500">
+                <p class="text-xs text-gray-400 mt-1">
+                    Задаётся в <code>.env</code> (GIGACHAT_CLIENT_ID). OAuth-токен получается автоматически
+                    (POST /oauth, Basic Auth + RqUID) и кэшируется до истечения expires_at.
+                </p>
             </div>
         </div>
 
@@ -89,8 +128,40 @@
 
         <hr class="border-gray-200">
 
+        <!-- Провайдер изображений -->
         <div>
-            <label class="block text-sm font-medium text-gray-600 mb-1">Модель для изображений по умолчанию</label>
+            <label class="block text-sm font-medium text-gray-600 mb-2">Провайдер генерации изображений</label>
+            <div class="flex flex-wrap gap-4">
+                <label class="inline-flex items-center text-sm font-medium text-gray-700">
+                    <input type="radio" name="image_provider" value="kandinsky"
+                           {% if values.image_provider != 'gigachat' %}checked{% endif %}
+                           onclick="toggleImageProvider()" class="mr-2">
+                        🎨 Kandinsky (FusionBrain)
+                </label>
+                <label class="inline-flex items-center text-sm font-medium text-gray-700">
+                    <input type="radio" name="image_provider" value="gigachat"
+                           {% if values.image_provider == 'gigachat' %}checked{% endif %}
+                           onclick="toggleImageProvider()" class="mr-2">
+                        🟢 GigaChat (/images/generations)
+                </label>
+            </div>
+        </div>
+
+        <div id="gc-image-section" class="space-y-5 {% if values.image_provider != 'gigachat' %}hidden{% endif %}">
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Модель для изображений (GigaChat)</label>
+                <input type="text" name="gigachat_image_model" value="{{ values.gigachat_image_model }}"
+                       placeholder="GigaChat"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                <p class="text-xs text-gray-400 mt-1">
+                    Fallback: GIGACHAT_IMAGE_MODEL из .env. Ответ <code>url</code> скачивается и сохраняется
+                    локально; <code>b64_json</code> декодируется в <code>static/uploads/</code>.
+                </p>
+            </div>
+        </div>
+
+        <div>
+            <label class="block text-sm font-medium text-gray-600 mb-1">Модель для изображений по умолчанию (Kandinsky/Ollama)</label>
             <input type="text" name="default_image_model" value="{{ values.default_image_model }}"
                    placeholder="например, sd-xl / flux-schnell"
                    class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
@@ -128,10 +199,27 @@
 </div>
 
 <script>
-    function toggleCloud(isOllama) {
-        document.getElementById('ollama-section').classList.toggle('hidden', !isOllama);
-        document.getElementById('cloud-section').classList.toggle('hidden', isOllama);
+    function toggleProvider() {
+        const radios = document.getElementsByName('ai_provider');
+        let provider = 'ollama';
+        for (const r of radios) { if (r.checked) { provider = r.value; break; } }
+        document.getElementById('ollama-section').classList.toggle('hidden', provider !== 'ollama');
+        document.getElementById('gigachat-section').classList.toggle('hidden', provider !== 'gigachat');
+        document.getElementById('cloud-section').classList.toggle('hidden', provider !== 'cloud');
     }
+
+    function toggleImageProvider() {
+        const radios = document.getElementsByName('image_provider');
+        let provider = 'kandinsky';
+        for (const r of radios) { if (r.checked) { provider = r.value; break; } }
+        document.getElementById('gc-image-section').classList.toggle('hidden', provider !== 'gigachat');
+    }
+
+    // Инициализация видимости секций при загрузке страницы
+    document.addEventListener('DOMContentLoaded', () => {
+        toggleProvider();
+        toggleImageProvider();
+    });
 
     function testCloud() {
         const box = document.getElementById('test-result');

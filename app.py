@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from config import settings
 from database import get_db, init_db
+from services.gigachat_client import is_gigachat_configured
 # FIX: Ненадёжные сессии в памяти -> персистентная модель Session в БД
 from models import (
     ChatMessage,
@@ -81,6 +82,16 @@ async def lifespan(app: FastAPI):
     logger.info("Запуск планировщика публикаций...")
     scheduler_thread = threading.Thread(target=start_scheduler, name="SchedulerStartup", daemon=True)
     scheduler_thread.start()
+    
+    # Инициализируем синглтон асинхронного клиента GigaChat (токен будет
+    # получен лениво при первом запросе и закэширован внутри экземпляра)
+    from services.gigachat_client import get_gigachat_client, is_gigachat_configured
+
+    app.state.gigachat_client = get_gigachat_client()
+    if is_gigachat_configured():
+        logger.info("GigaChat credentials найдены — облачная генерация доступна")
+    else:
+        logger.info("GigaChat credentials не заданы — используются Ollama/Kandinsky из .env")
     
     yield
     
@@ -586,10 +597,15 @@ AI_SETTING_KEYS = {
     "default_image_model": lambda: "",
     "generation_temperature": lambda: "0.7",
     # Облачные модели (OpenAI-совместимый Chat Completions API)
-    "ai_provider": lambda: "ollama",  # ollama | cloud
+    "ai_provider": lambda: "ollama",  # ollama | cloud | gigachat
     "cloud_api_base_url": lambda: "",  # например https://openrouter.ai/api/v1
     "cloud_api_key": lambda: settings.gigachat_key or "",
     "cloud_text_model": lambda: "",  # например deepseek/deepseek-chat
+    # GigaChat Premium (полноценная интеграция: OAuth + /chat/completions)
+    # Значения по умолчанию берутся из config.py (.env), в БД можно переопределить
+    "gigachat_text_model": lambda: settings.gigachat_text_model,
+    "gigachat_image_model": lambda: settings.gigachat_image_model,
+    "image_provider": lambda: "kandinsky",  # kandinsky | gigachat
 }
 
 
@@ -628,8 +644,10 @@ def build_ai_config(db: Session) -> Dict[str, Any]:
     text_model = get_system_setting(db, "default_text_model")
     if provider == "cloud":
         text_model = get_system_setting(db, "cloud_text_model") or text_model
+    if provider == "gigachat":
+        text_model = get_system_setting(db, "gigachat_text_model") or text_model
     return {
-        "provider": provider if provider in ("ollama", "cloud") else "ollama",
+        "provider": provider if provider in ("ollama", "cloud", "gigachat") else "ollama",
         "ollama_base_url": get_system_setting(db, "ollama_base_url"),
         "default_text_model": text_model,
         "default_image_model": get_system_setting(db, "default_image_model"),
@@ -637,6 +655,11 @@ def build_ai_config(db: Session) -> Dict[str, Any]:
         "cloud_api_base_url": get_system_setting(db, "cloud_api_base_url"),
         "cloud_api_key": get_system_setting(db, "cloud_api_key"),
         "cloud_text_model": get_system_setting(db, "cloud_text_model"),
+        # GigaChat Premium
+        "gigachat_text_model": get_system_setting(db, "gigachat_text_model"),
+        "gigachat_image_model": get_system_setting(db, "gigachat_image_model"),
+        "image_provider": get_system_setting(db, "image_provider"),
+        "gigachat_configured": is_gigachat_configured(),
     }
 
 
@@ -648,10 +671,24 @@ def admin_settings_page(
 ):
     """Страница настроек AI: значения из SystemSetting или fallback из config.py."""
     values = {key: get_system_setting(db, key) for key in AI_SETTING_KEYS}
+
+    # Маскируем client_id для отображения read-only в админке
+    cid = settings.effective_gigachat_client_id
+    if cid:
+        masked = cid[:4] + "…" + cid[-4:] if len(cid) > 8 else "•" * len(cid)
+    else:
+        masked = "(не задан в .env)"
+
     return templates.TemplateResponse(
         request=request,
         name="admin_settings.html",
-        context={"user": admin, "admin": admin, "values": values},
+        context={
+            "user": admin,
+            "admin": admin,
+            "values": values,
+            "gigachat_configured": is_gigachat_configured(),
+            "gigachat_client_id_masked": masked,
+        },
     )
 
 
@@ -665,14 +702,24 @@ def admin_settings_update(
     cloud_api_base_url: str = Form(""),
     cloud_api_key: str = Form(""),
     cloud_text_model: str = Form(""),
+    gigachat_text_model: str = Form(""),
+    gigachat_image_model: str = Form(""),
+    image_provider: str = Form("kandinsky"),
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
     """Создаёт или обновляет записи SystemSetting (без перезапуска приложения)."""
-    if ai_provider not in ("ollama", "cloud"):
+    if ai_provider not in ("ollama", "cloud", "gigachat"):
         raise HTTPException(
             status_code=400,
-            detail="Неизвестный провайдер AI: выберите 'ollama' или 'cloud'",
+            detail=(
+                "Неизвестный провайдер AI: выберите 'ollama', 'cloud' или 'gigachat'"
+            ),
+        )
+    if image_provider not in ("kandinsky", "gigachat"):
+        raise HTTPException(
+            status_code=400,
+            detail="Неизвестный провайдер изображений: 'kandinsky' или 'gigachat'",
         )
 
     payload = {
@@ -684,6 +731,9 @@ def admin_settings_update(
         "cloud_api_base_url": cloud_api_base_url.strip().rstrip("/"),
         "cloud_api_key": cloud_api_key.strip(),
         "cloud_text_model": cloud_text_model.strip(),
+        "gigachat_text_model": gigachat_text_model.strip(),
+        "gigachat_image_model": gigachat_image_model.strip(),
+        "image_provider": image_provider,
     }
     # Валидация температуры
     try:
@@ -705,11 +755,30 @@ def admin_settings_update(
                     "и название модели"
                 ),
             )
+    # GigaChat требует креды из .env (client_id/client_secret)
+    if (
+        payload["ai_provider"] == "gigachat" or payload["image_provider"] == "gigachat"
+    ) and not is_gigachat_configured():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "GigaChat выбран провайдером, но GIGACHAT_CLIENT_ID / "
+                "GIGACHAT_CLIENT_SECRET не заданы в .env — добавьте их и "
+                "перезапустите приложение"
+            ),
+        )
 
     save_system_settings(db, payload)
+
+    # Пересоздаём синглтон клиента GigaChat, чтобы изменения (в т.ч. динамически
+    # обновлённые значения config.py и смена кредов в .env) применились без перезапуска
+    from services import gigachat_client as gc
+
+    gc.reset_gigachat_client()
+
     logger.info(
         f"[admin] {admin.email}: обновил системные настройки AI "
-        f"(провайдер: {payload['ai_provider']})"
+        f"(текст: {payload['ai_provider']}, изображения: {payload['image_provider']})"
     )
     return RedirectResponse(url="/admin/settings", status_code=302)
 
@@ -719,11 +788,49 @@ def admin_settings_test_cloud(
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """Проверяет подключение к облачной модели: POST {base_url}/chat/completions."""
+    """Проверяет подключение к облачной модели: POST {base_url}/chat/completions.
+
+    Для провайдера 'gigachat' использует полноценный асинхронный
+    GigaChatClient (OAuth + повтор при 401).
+    """
     cfg = build_ai_config(db)
+
+    # --- Тест GigaChat Premium через асинхронный клиент ---
+    if cfg["provider"] == "gigachat":
+        if not is_gigachat_configured():
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "detail": (
+                        "GigaChat credentials не заданы в .env "
+                        "(GIGACHAT_CLIENT_ID / GIGACHAT_CLIENT_SECRET)"
+                    ),
+                },
+                status_code=400,
+            )
+        from services.gigachat_client import get_gigachat_client, run_sync
+
+        client = get_gigachat_client()
+        try:
+            reply = run_sync(
+                client.generate_text(
+                    prompt="ping",
+                    system_prompt="",
+                    temperature=cfg["generation_temperature"],
+                    max_tokens=5,
+                    model=(cfg["gigachat_text_model"] or "").strip() or None,
+                )
+            )
+            logger.info(f"[admin] {admin.email}: тест GigaChat успешен")
+            return JSONResponse({"ok": True, "reply": (reply or "(пустой ответ)")[:200]})
+        except Exception as e:  # noqa: BLE001 — показываем админу суть ошибки
+            logger.warning(f"[admin] {admin.email}: тест GigaChat не удался: {e}")
+            return JSONResponse({"ok": False, "detail": str(e)[:300]}, status_code=400)
+
+    # --- Тест OpenAI-совместимого облака ---
     if cfg["provider"] != "cloud":
         return JSONResponse(
-            {"ok": False, "detail": "Текущий провайдер — не облачный (cloud)."},
+            {"ok": False, "detail": "Текущий провайдер — не облачный (cloud/gigachat)."},
             status_code=400,
         )
     if not cfg["cloud_api_base_url"] or not cfg["cloud_text_model"]:

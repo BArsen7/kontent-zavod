@@ -14,12 +14,14 @@
 **Ключевые возможности:**
 - 🔐 **Авторизация по email и паролю** — регистрация, вход, защищённые сессии (httponly-cookie)
 - 👥 **Управление несколькими сообществами VK** — добавление сообществ с проверкой прав администратора, динамическая регистрация токенов
-- 🤖 **Генерация текста** через локальные LLM (Ollama: Qwen2.5) или облачной API (GigaChat)
-- 🎨 **Создание изображений** через Kandinsky (GigaChat Image API)
+- 🤖 **Генерация текста** через локальные LLM (Ollama: Qwen2.5) или облачный API **GigaChat Premium** (`GigaChat-Pro` / `GigaChat-Max`) — провайдер выбирается в админке без перезапуска
+- 🎨 **Создание изображений** через Kandinsky / GigaChat Image API (облачно или локально через Ollama; ответы `url` и `b64_json` сохраняются в `static/uploads/`)
 - 🧑‍💼 **Персональный ИИ-контент-менеджер** — чат с нейросетью, который задаёт уточняющие вопросы и генерирует контент-план на неделю / 2 недели / месяц (подробнее в [CONTENT_MANAGER_README.md](CONTENT_MANAGER_README.md))
 - ⏰ **Фоновый планировщик** (APScheduler) для автоматической публикации одобренных постов каждые 30 минут
 - 📊 **Веб-интерфейс** (Jinja2 + локальный CSS без CDN): главная страница со списком постов, страница контент-менеджера, страница входа/регистрации
-- 🛡️ **Панель администратора** (`/admin`): сводная статистика, управление пользователями (выдача/снятие прав через `scripts/make_admin.py` и UI), просмотр всех сообществ
+- 🔑 **Интеграция GigaChat** (`services/gigachat_client.py`): OAuth 2.0 с кэшированием токена, автообновлением до истечения `expires_at`, повтором при 401 и обработкой лимитов 429
+- 🛡️ **Панель администратора** (`/admin`): сводная статистика, полное управление пользователями (блок/разблокировка/удаление/создание, выдача прав) и сообществами (блок/разблокировка/удаление/привязка), страница **«Настройки AI»** (`/admin/settings`) с выбором провайдера (Ollama / GigaChat), моделями, температурой и тестом подключения
+- 🚫 **Блокировка аккаунтов**: заблокированный пользователь перенаправляется на `/account-blocked` с указанием причины; планировщик пропускает публикации заблокированных сообществ и владельцев
 - 🛠️ **CLI-скрипты** для ручного управления и автоматизации рутинных задач
 - 🔄 **CommunityManager (мастер-бот)** — управление множеством сообществ VK через единый интерфейс и LongPoll (архитектура описана в [ARCHITECTURE.md](ARCHITECTURE.md))
 
@@ -57,16 +59,17 @@
 |-----------|------|------------|
 | FastAPI-приложение | `app.py` | Точка входа: веб-роуты, API, lifespan (запуск БД, CommunityManager, планировщика) |
 | Настройки | `config.py` | Класс `Settings` (pydantic-settings), чтение `.env` |
-| Модели БД | `models.py` | SQLAlchemy-модели: `User`, `UserCommunity`, `PlatformAccount`, `ContentPlan`, `Post`, `PostStats`, `ContentPlanPeriod`, `ChatMessage` |
-| Генерация текста | `generators/text_generator.py` | `generate_text()` — обёртки над Ollama и GigaChat |
-| Генерация изображений | `generators/image_generator.py` | `generate_kandinsky()` — Kandinsky через GigaChat API |
+| Модели БД | `models.py` | SQLAlchemy-модели: `User` (+`is_blocked`/`blocked_reason`/`blocked_at`), `UserCommunity` (+блокировка), `Session`, `PlatformAccount`, `ContentPlan`, `Post`, `PostStats`, `ContentPlanPeriod`, `ChatMessage`, `SystemSetting` (динамические настройки AI) |
+| Генерация текста | `generators/text_generator.py` | `generate_text()` — диспетчер провайдеров: GigaChat (облако) / Ollama (локально) |
+| Генерация изображений | `generators/image_generator.py` | `generate_kandinsky()` — Kandinsky через GigaChat Image API (облако) или локальная модель через Ollama |
+| Клиент GigaChat | `services/gigachat_client.py` | `GigaChatClient` — асинхронный httpx-клиент: OAuth-токен (кэш+авто-обновление), `/chat/completions`, `/images/generations` |
 | Публикация | `publishers/vk_publisher.py` | `VKPublisher` — публикация в одно сообщество (токен из настроек) |
 | Обработка ошибок VK | `vk_errors.py` | `create_vk_session` (api_version 5.199), `describe_api_error`, `with_retry`, нормализация `group_id` |
 | Мастер-бот | `managers/community_manager.py` | `CommunityManager` — управление множеством сообществ, LongPoll, `/add_token` |
 | Сервис паков | `services/content_service.py` | `generate_weekly_pack()` — генерация пакета постов (week / two_weeks / month) |
 | Контент-менеджер | `services/content_manager_service.py` | Чат с ИИ, генерация и обновление планов, проверка истекающих периодов |
 | Планировщик | `services/scheduler.py` | APScheduler: `check_and_publish()` каждые 30 минут |
-| Панель администратора | `app.py` + `web/templates/admin_*.html` | `/admin`, `/admin/users`, `/admin/communities` — защита `get_current_admin` |
+| Панель администратора | `app.py` + `web/templates/admin_*.html` | `/admin`, `/admin/users`, `/admin/communities`, `/admin/settings` — защита `get_current_admin` |
 | Стили UI | `web/static/styles.css` | Локальный stylesheet (замена Tailwind Play CDN): все утилитарные классы шаблонов |
 | Legacy-бот | `bots/vk_bot.py` | Одиночный VK-бот (LongPoll) — оставлен для совместимости, в `app.py` не запускается |
 
@@ -74,7 +77,7 @@
 
 1. **Генерация**: пользователь инициирует генерацию через веб-интерфейс (`POST /api/generate/weekly`), чат контент-менеджера или CLI-скрипт → Ollama/GigaChat генерируют тексты, Kandinsky — изображения → результаты сохраняются в SQLite со статусом `draft`.
 2. **Модерация**: просмотр черновиков в веб-интерфейсе или через API (`POST /api/posts/{id}/approve`) меняет статус на `approved`.
-3. **Публикация**: APScheduler каждые 30 минут находит посты `approved` с `publish_at <= now()` и публикует их через `VKPublisher` (токен из `.env`); ручная публикация — `POST /api/publish/vk/{post_id}` через `CommunityManager` (токены сообществ из БД). Статус меняется на `published`.
+3. **Публикация**: APScheduler каждые 30 минут находит посты `approved` с `publish_at <= now()` и публикует их через `VKPublisher` (токен из `.env`); ручная публикация — `POST /api/publish/vk/{post_id}` через `CommunityManager` (токены сообществ из БД). Статус меняется на `published`. Планировщик **пропускает** посты заблокированных сообществ и заблокированных владельцев (`is_blocked`), чтобы не спамить ошибками VK API.
 
 ---
 
@@ -114,14 +117,24 @@ pip install -r requirements.txt
 | `fastapi` | Веб-фреймворк и REST API |
 | `uvicorn[standard]` | ASGI-сервер |
 | `sqlalchemy` | ORM для SQLite |
-| `pydantic-settings` | Конфигурация из `.env` |
+| `pydantic` + `pydantic-settings` | Модели и конфигурация из `.env` |
 | `python-dotenv` | Загрузка переменных окружения |
-| `requests` | HTTP-клиент (Ollama, GigaChat, Kandinsky) |
+| `requests` | Синхронный HTTP-клиент (Ollama, скрипты) |
+| `httpx>=0.24` | **Асинхронный HTTP-клиент — обязателен** для интеграции с облачным API GigaChat (`services/gigachat_client.py`) |
 | `jinja2` | HTML-шаблоны веб-интерфейса |
-| `python-multipart` | Обработка form-данных (логин/регистрация) |
+| `python-multipart` | Обработка form-данных (логин/регистрация, формы админки) |
 | `apscheduler` | Фоновый планировщик публикаций |
 | `vk-api` | Клиент ВКонтакте (публикация, LongPoll) |
-| `passlib[bcrypt]` | Хеширование паролей пользователей |
+| `bcrypt` | Хеширование паролей пользователей (используется напрямую; `passlib` несовместим с `bcrypt >= 4.1`) |
+
+> ⚠️ **Обновление зависимостей**: после `git pull` обязательно выполните `pip install -r requirements.txt` — в проекте появился новый обязательный пакет `httpx` (асинхронный клиент GigaChat, `services/gigachat_client.py`). Без него запуск падает с ошибкой `ModuleNotFoundError: No module named 'httpx'` при импорте `app.py`.
+>
+> Быстрая проверка, что всё установлено:
+> ```bash
+> source venv/bin/activate
+> pip install -r requirements.txt
+> python -c "import httpx, fastapi, sqlalchemy, vk_api, bcrypt, apscheduler; print('OK', httpx.__version__)"
+> ```
 
 ### Шаг 4: Установка Ollama
 
@@ -174,8 +187,14 @@ nano .env
 |------------|--------------|----------|-----------------|
 | `DB_PATH` | нет (есть дефолт) | Путь к файлу SQLite БД | `data/autopilot.db` |
 | `OLLAMA_URL` | для генерации через Ollama | URL сервера Ollama | `http://localhost:11434` |
-| `GIGACHAT_KEY` | для Kandinsky/GigaChat | API-ключ GigaChat | `your_gigachat_key_here` |
-| `GIGACHAT_SECRET` | для Kandinsky/GigaChat | Секретный ключ GigaChat | `your_gigachat_secret_here` |
+| `GIGACHAT_CLIENT_ID` | для облака GigaChat | Client ID приложения GigaChat (Premium) | `d27c0f5e-...` |
+| `GIGACHAT_CLIENT_SECRET` | для облака GigaChat | Client Secret приложения GigaChat | `s3cr3t...` |
+| `GIGACHAT_SCOPE` | нет (дефолт `GIGACHAT_API_PERS`) | OAuth scope: `GIGACHAT_API_PERS` / `GIGACHAT_API_CORP` / `GIGACHAT_API_B2B` | `GIGACHAT_API_PERS` |
+| `GIGACHAT_TEXT_MODEL` | нет (дефолт `GigaChat-Pro`) | Модель для текста (Premium: `GigaChat-Pro`, `GigaChat-Max`) | `GigaChat-Pro` |
+| `GIGACHAT_IMAGE_MODEL` | нет (дефолт `GigaChat`) | Модель для генерации изображений | `GigaChat` |
+| `GIGACHAT_BASE_URL` | нет (дефолт prod-API) | Базовый URL GigaChat API | `https://gigachat.devices.sberbank.ru/api/v1` |
+| `GIGACHAT_VERIFY_SSL` | нет (дефолт `true`) | Проверка SSL-сертификата при запросах к GigaChat | `false` (только для отладки) |
+| `GIGACHAT_KEY` / `GIGACHAT_SECRET` | устаревшие имена | Fallback: если `GIGACHAT_CLIENT_ID/SECRET` не заданы, клиент использует их (`effective_gigachat_client_id/secret` в `config.py`) | — |
 | `VK_TOKEN` | для планировщика | Токен сообщества VK (использует `VKPublisher` в scheduler) | `vk1.a.ABC123...` |
 | `VK_GROUP_ID` | для планировщика | ID группы VK (число) | `123456789` |
 | `TG_BOT_TOKEN` | нет | Зарезервировано под будущего Telegram-бота | — |
@@ -190,8 +209,14 @@ DB_PATH=data/autopilot.db
 
 # AI Services
 OLLAMA_URL=http://localhost:11434
-GIGACHAT_KEY=your_gigachat_key_here
-GIGACHAT_SECRET=your_gigachat_secret_here
+
+# GigaChat Premium (облачная генерация текста и изображений)
+GIGACHAT_CLIENT_ID=d27c0f5e-1234-5678-90ab-cdef12345678
+GIGACHAT_CLIENT_SECRET=your_client_secret_here
+GIGACHAT_SCOPE=GIGACHAT_API_PERS
+GIGACHAT_TEXT_MODEL=GigaChat-Pro
+GIGACHAT_IMAGE_MODEL=GigaChat
+GIGACHAT_BASE_URL=https://gigachat.devices.sberbank.ru/api/v1
 
 # VKontakte settings
 VK_TOKEN=vk1.a.ABC123xyz789...
@@ -208,6 +233,20 @@ LOG_LEVEL=INFO
 > ℹ️ Для добавления сообщества через веб-интерфейс токен сообщества вводится прямо в форме — постоянные `VK_TOKEN`/`VK_GROUP_ID` нужны только планировщику `services/scheduler.py`. Поля `VK_CLIENT_ID`, `VK_CLIENT_SECRET`, `VK_REDIRECT_URI` в `.env.example` зарезервированы под будущий OAuth и текущим кодом не используются (`Settings` игнорирует неизвестные переменные окружения — `extra="ignore"`).
 
 ### Возможные ошибки при запуске
+
+**`ModuleNotFoundError: No module named 'httpx'` (падение при старте uvicorn)**
+
+Причина: в виртуальном окружении не установлен асинхронный HTTP-клиент `httpx`, который требуется модулю `services/gigachat_client.py` (импортируется на этапе загрузки `app.py`).
+
+Решение: активируйте то же venv, в котором запускаете сервер, и установите зависимости из актуального `requirements.txt`:
+
+```bash
+source venv/bin/activate
+pip install -r requirements.txt
+uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Проверка: `python -c "import httpx; print(httpx.__version__)"` должно вывести версию (>= 0.24). Если проверка падает — вы запускаете uvicorn не из того окружения (убедитесь, что в приглашении shell есть `(venv)`).
 
 **`pydantic_core.ValidationError: Extra inputs are not permitted (vk_client_id ...)`**
 
@@ -453,8 +492,10 @@ http://<IP_СЕРВЕРА>:8000
 | Главная | `/` | Таблица всех постов (доступна после входа) |
 | Контент-менеджер | `/content-manager` | Чат с ИИ-маркетологом и генерация контент-планов |
 | Админ-дашборд | `/admin` | Сводная статистика (пользователи, сообщества, посты) — только для `is_admin` |
-| Админ: пользователи | `/admin/users` | Список пользователей, переключение прав администратора |
-| Админ: сообщества | `/admin/communities` | Все привязанные сообщества с владельцами |
+| Админ: пользователи | `/admin/users` | Список пользователей: статус (активен/заблокирован), блок/разблок/удаление/создание, переключение прав администратора |
+| Админ: сообщества | `/admin/communities` | Все привязанные сообщества: статус, блок/разблок/удаление, привязка нового сообщества к пользователю |
+| Админ: настройки AI | `/admin/settings` | Провайдер (Ollama / GigaChat), модели текста и изображений, температура, base URL, статус credentials, тест подключения |
+| Заблокированный аккаунт | `/account-blocked` | Публичная страница с причиной и датой блокировки (куда редиректится заблокированный пользователь) |
 
 #### 🔐 Авторизация
 
@@ -476,7 +517,11 @@ python scripts/make_admin.py user@example.com            # выдать
 python scripts/make_admin.py user@example.com --revoke   # снять
 ```
 
-Первым администратором обычно делают себя сразу после регистрации. В панели можно просматривать статистику, список всех пользователей и сообществ, а также переключать права `is_admin` кнопкой прямо в таблице пользователей (`POST /admin/users/{id}/toggle_admin`).
+Первым администратором обычно делают себя сразу после регистрации. В панели можно:
+
+- **Пользователи** (`/admin/users`): список со статусом, выдача/снятие прав `is_admin` (`POST /admin/users/{id}/toggle_admin`), блокировка с указанием причины (`POST /admin/users/{id}/block`) и разблокировка (`/unblock`), удаление (`/delete`, каскадно с сессиями и контентом), создание новых (`POST /admin/users/add`, пароль хешируется bcrypt). Заблокированный пользователь при любом запросе редиректится на `/account-blocked`; сам себе заблокировать/удалить администратор не может.
+- **Сообщества** (`/admin/communities`): список всех сообществ с владельцами и статусом, блокировка/разблокировка (`POST /admin/communities/{id}/block|unblock`), удаление (`/delete`), привязка существующего сообщества к пользователю (`POST /admin/communities/add`: email владельца, `group_id`, `group_token`, имя).
+- **Настройки AI** (`/admin/settings`): выбор провайдера генерации (`ai_provider`: `ollama` или `gigachat`), базовый URL Ollama, модели (`GigaChat-Pro`/`GigaChat-Max` для текста, `GigaChat`/`Kandinsky-Max`/`Kandinsky-3.1` для изображений, `sdxl` и т.п. для локального Ollama), температура генерации. Значения хранятся в таблице `system_settings` (модель `SystemSetting`) и применяются **без перезапуска**; при отсутствии ключа — fallback в переменных `.env`. `GIGACHAT_CLIENT_ID`/`CLIENT_SECRET` задаются только через `.env` (секреты не пишутся в БД; в UI показывается статус «настроено / не настроено»). Кнопка «Проверить подключение» выполняет тестовый запрос к выбранному провайдеру.
 
 #### 👥 Управление сообществами
 
@@ -644,7 +689,14 @@ http://<IP_СЕРВЕРА>:8000/docs
 | `GET` | `/admin` | Панель администратора: сводная статистика | `is_admin` |
 | `GET` | `/admin/users` | Панель администратора: список пользователей | `is_admin` |
 | `POST` | `/admin/users/{user_id}/toggle_admin` | Выдать/снять права администратора | `is_admin` |
+| `POST` | `/admin/users/add` | Создать пользователя (email, пароль — bcrypt, имя, `is_admin`) | `is_admin` |
+| `POST` | `/admin/users/{user_id}/block` / `/unblock` / `/delete` | Блокировка (form: `blocked_reason`)/разблокировка/удаление пользователя | `is_admin` |
 | `GET` | `/admin/communities` | Панель администратора: все сообщества с владельцами | `is_admin` |
+| `POST` | `/admin/communities/add` | Привязать сообщество к пользователю (email владельца, group_id, токен) | `is_admin` |
+| `POST` | `/admin/communities/{comm_id}/block` / `/unblock` / `/delete` | Блокировка/разблокировка/удаление сообщества | `is_admin` |
+| `GET`/`POST` | `/admin/settings` | Просмотр и сохранение настроек AI (провайдер, модели, температура) | `is_admin` |
+| `POST` | `/admin/settings/test` | Тест подключения к выбранному AI-провайдеру | `is_admin` |
+| `GET` | `/account-blocked` | Страница «Аккаунт заблокирован» (публичная) | нет |
 
 **Аутентификация:**
 
@@ -796,7 +848,7 @@ autopilot-content/
 ├── app.py                      # FastAPI: lifespan, веб-роуты, API, аутентификация, админ-панель
 ├── config.py                   # Settings (pydantic-settings), чтение .env
 ├── database.py                 # Engine, SessionLocal, init_db() + лёгкие миграции схемы
-├── models.py                   # SQLAlchemy-модели (9 таблиц, включая sessions)
+├── models.py                   # SQLAlchemy-модели (10 таблиц: users, sessions, system_settings и др.)
 ├── vk_errors.py                # VK API: сессия (5.199), расшифровка ошибок, retry, group_id
 ├── requirements.txt            # Зависимости Python
 ├── .env.example                # Шаблон переменных окружения
@@ -822,7 +874,8 @@ autopilot-content/
 ├── services/                   # Бизнес-логика
 │   ├── content_service.py      # generate_weekly_pack(): пак постов (week/two_weeks/month)
 │   ├── content_manager_service.py  # Чат с ИИ, планы, автообновление
-│   └── scheduler.py            # APScheduler: check_and_publish() каждые 30 мин
+│   ├── gigachat_client.py      # GigaChatClient: OAuth-токен (кэш), chat/completions, images/generations
+│   └── scheduler.py            # APScheduler: check_and_publish() каждые 30 мин (+пропуск заблокированных)
 │
 ├── scripts/                    # CLI-скрипты
 │   ├── generate_post.py        # Генерация одиночного поста
@@ -840,8 +893,10 @@ autopilot-content/
 │       ├── content_manager.html# Интерфейс контент-менеджера (чат + периоды)
 │       ├── admin_base.html     # Каркас админ-панели (сайдбар, навигация)
 │       ├── admin_dashboard.html# Админ: сводная статистика
-│       ├── admin_users.html    # Админ: пользователи + переключение прав
-│       └── admin_communities.html # Админ: все сообщества
+│       ├── admin_users.html    # Админ: пользователи (статус, блок/разблок/удалить/добавить, права)
+│       ├── admin_communities.html # Админ: все сообщества (статус, блок/удаление, добавление)
+│       ├── admin_settings.html # Админ: настройки AI (Ollama/GigaChat, модели, температура)
+│       └── account_blocked.html # Страница «Аккаунт заблокирован»
 │
 └── data/                       # Данные (каталог создаётся автоматически)
     └── autopilot.db            # SQLite база данных
@@ -852,12 +907,13 @@ autopilot-content/
 | Файл/Папка | Назначение |
 |------------|------------|
 | `app.py` | Точка входа FastAPI: lifespan (init_db, CommunityManager, scheduler), роуты (включая `/admin*`), сессии в БД, bcrypt, защита `get_current_user`/`require_auth`/`get_current_admin`, раздача `/static` |
-| `config.py` | Класс Settings: db_path, ollama_url, gigachat_key/secret, vk_token/group_id, tg_*, log_level (`extra="ignore"`) |
-| `database.py` | SQLite engine (`check_same_thread=False`), SessionLocal, get_db(), init_db() + авто-миграции (`users.email`, `is_admin`, `content_plan_periods.title`) |
-| `models.py` | User, Session, UserCommunity, PlatformAccount, ContentPlan, Post, PostStats, ContentPlanPeriod, ChatMessage |
+| `config.py` | Класс Settings: db_path, ollama_url, gigachat_client_id/secret (+fallback key/secret), scope, text/image model, base_url, verify_ssl, vk_token/group_id, tg_*, log_level (`extra="ignore"`) |
+| `database.py` | SQLite engine (`check_same_thread=False`), SessionLocal, get_db(), init_db() + безопасные ALTER TABLE миграции (`users.is_admin/is_blocked/blocked_reason/blocked_at`, `user_communities.is_blocked/blocked_reason`, таблица `system_settings`) |
+| `models.py` | User, Session, UserCommunity, PlatformAccount, ContentPlan, Post, PostStats, ContentPlanPeriod, ChatMessage, SystemSetting |
 | `vk_errors.py` | create_vk_session (VK_API_VERSION=5.199), describe_api_error, with_retry, positive_group_id/owner_id_for_group, format_photo_attachment |
-| `generators/text_generator.py` | generate_text_ollama (qwen2.5:14b), generate_text_gigachat, generate_text (диспетчер) |
-| `generators/image_generator.py` | _get_gigachat_token (OAuth-авторизация GigaChat), generate_kandinsky |
+| `generators/text_generator.py` | generate_text_ollama (qwen2.5:14b), generate_text_gigachat (через GigaChatClient), generate_text (диспетчер провайдеров: SystemSetting → .env) |
+| `generators/image_generator.py` | generate_kandinsky: облачная генерация через GigaChat Image API (url/b64_json → static/uploads/) либо локальная модель через Ollama |
+| `services/gigachat_client.py` | GigaChatClient (синглтон get_gigachat_client): POST /oauth (Basic auth + RqUID, кэш токена, буфер 60 с, asyncio.Lock, повтор при 401), POST /chat/completions, POST /images/generations, is_gigachat_configured(); логирование полных ответов Sber для отладки |
 | `publishers/vk_publisher.py` | VKPublisher: walls.post с загрузкой фото через docs.getMessagesUploadServer |
 | `managers/community_manager.py` | CommunityManager + CommunityAccount: register/unregister, publish_to_community, LongPoll-потоки, команды бота |
 | `services/content_service.py` | generate_weekly_pack(niche, db, period_type): план + пак постов по типам (PACK_PERIODS) |
@@ -895,13 +951,14 @@ class OKPublisher(BasePublisher):
 
 Затем зарегистрируйте площадку в `CommunityManager` (расширьте валидацию `CommunityAccount.platform`) или используйте напрямую в `app.py`/планировщике.
 
-### 2. Как изменить модель для генерации текста?
+### 2. Как изменить модель / провайдера для генерации текста и изображений?
 
-- Название модели задано значением по умолчанию в `generate_text_ollama(model="qwen2.5:14b")` (`generators/text_generator.py`). Чтобы сменить модель глобально, измените параметр по умолчанию или передавайте `model` явно из вызывающего кода.
+- **Без перезапуска (рекомендуется)**: страница `/admin/settings` — выберите провайдер (`ollama` или `gigachat`), укажите модель текста (`GigaChat-Pro`, `GigaChat-Max` для облака; `qwen2.5:14b` для Ollama), модель изображений (`GigaChat`, `Kandinsky-Max` / `Kandinsky-3.1` для облака; `sdxl`/`sd3.5-large` для Ollama) и температуру. Значения сохраняются в таблицу `system_settings` и применяются генераторами при следующем вызове; там же есть кнопка «Проверить подключение».
+- Через `.env` (fallback, если ключ в БД не задан): `GIGACHAT_TEXT_MODEL`, `GIGACHAT_IMAGE_MODEL`, `GIGACHAT_BASE_URL`, `OLLAMA_URL`.
+- Название локальной модели по умолчанию задано в `generate_text_ollama(model="qwen2.5:14b")` (`generators/text_generator.py`).
 - Разово через CLI: `python scripts/generate_post.py --topic "Тема" --model "gigachat"` (выбор между ollama/gigachat).
-- Отдельная легковесная модель: `python scripts/generate_weekly.py --niche "handmade_jewelry"`.
 
-> ℹ️ Переменных `OLLAMA_MODEL`/`OLLAMA_TIMEOUT` в `config.py` нет — модель выбирается в коде, а не через `.env`.
+> ℹ️ `GIGACHAT_CLIENT_ID`/`GIGACHAT_CLIENT_SECRET` редактируются только в `.env` — секреты не хранятся в БД.
 
 ### 3. Бот не отвечает в ВК. Что делать?
 
@@ -1021,7 +1078,7 @@ sudo systemctl status autopilot.service
 **Autopilot Content** — это готовое решение для автоматизации ведения социальных сетей: генерация контента (текст + изображения), персональный ИИ-контент-менеджер, модерация черновиков и автоматическая публикация по расписанию.
 
 **Что вы получаете:**
-- ✅ Автономную генерацию контента через локальные LLM и Kandinsky
+- ✅ Автономную генерацию контента через локальные LLM (Ollama) и облачные модели GigaChat Premium (текст + изображения)
 - ✅ Контент-планы на неделю/2 недели/месяц, построенные в диалоге с ИИ
 - ✅ Управление несколькими сообществами VK (веб-интерфейс, API, мастер-бот, CLI)
 - ✅ Гибкое планирование и автопубликацию (APScheduler)

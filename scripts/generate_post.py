@@ -148,8 +148,8 @@ def main():
         try:
             image_path = generate_kandinsky(
                 prompt=image_prompt,
-                api_key=settings.gigachat_key,
-                secret_key=settings.gigachat_secret,
+                api_key=settings.effective_gigachat_client_id,
+                secret_key=settings.effective_gigachat_client_secret,
                 save_dir="data/media"
             )
             logger.info(f"Изображение сохранено: {image_path}")
