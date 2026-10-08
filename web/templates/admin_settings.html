@@ -267,6 +267,19 @@
             });
     }
 
+    function toggleImageProvider() {
+        const radios = document.getElementsByName('image_provider');
+        let provider = 'kandinsky';
+        for (const r of radios) { if (r.checked) { provider = r.value; break; } }
+        document.getElementById('gc-image-section').classList.toggle('hidden', provider !== 'gigachat');
+    }
+
+    // Инициализация видимости секций при загрузке страницы
+    document.addEventListener('DOMContentLoaded', () => {
+        toggleProvider();
+        toggleImageProvider();
+    });
+
     function testCloud() {
         const box = document.getElementById('test-result');
         box.classList.remove('hidden', 'bg-green-100', 'bg-red-100');

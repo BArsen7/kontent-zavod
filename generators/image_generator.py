@@ -89,6 +89,61 @@ def generate_image_gigachat(
 generate_gigachat_image = generate_image_gigachat
 
 
+def generate_gigachat_image(
+    prompt: str,
+    save_dir: str = "static/uploads",
+    size: str = "1024x1024",
+) -> str:
+    """
+    Генерация изображения через облачной GigaChat API (POST /images/generations).
+
+    Если API вернул url — скачиваем его и сохраняем локально (посты в VK
+    требуют путь к файлу); если вернул b64_json — клиент сам сохраняет файл.
+
+    Args:
+        prompt: Текстовое описание изображения.
+        save_dir: Директория для сохранения изображений.
+        size: Размер изображения (например "1024x1024").
+
+    Returns:
+        Локальный путь к сохранённому файлу.
+
+    Raises:
+        RuntimeError: Если креды не настроены или генерация не удалась.
+    """
+    if not is_gigachat_configured():
+        raise RuntimeError(
+            "GigaChat credentials не настроены в .env файле "
+            "(GIGACHAT_CLIENT_ID / GIGACHAT_CLIENT_SECRET)"
+        )
+
+    from services.gigachat_client import get_gigachat_client, run_sync
+
+    client = get_gigachat_client()
+    result = run_sync(client.generate_image(prompt=prompt, size=size))
+
+    # Результат может быть внешним URL (response_format=url) — скачиваем локально
+    if result.startswith("http://") or result.startswith("https://"):
+        try:
+            resp = requests.get(result, timeout=60)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Не удалось скачать изображение из GigaChat ({result}): {e}")
+            raise RuntimeError(f"Ошибка скачивания изображения GigaChat: {e}")
+
+        save_path = Path(save_dir)
+        save_path.mkdir(parents=True, exist_ok=True)
+        filename = f"{uuid.uuid4().hex}.png"
+        file_path = save_path / filename
+        file_path.write_bytes(resp.content)
+        rel_path = str(file_path)
+        logger.info(f"Изображение GigaChat сохранено: {rel_path}")
+        return rel_path
+
+    logger.info(f"Изображение GigaChat готово: {result}")
+    return result
+
+
 def generate_kandinsky(
     prompt: str,
     api_key: str,
