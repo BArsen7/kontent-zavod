@@ -2,6 +2,7 @@ import logging
 import requests
 
 from config import settings
+from services.gigachat_client import is_gigachat_configured
 
 logger = logging.getLogger(__name__)
 
@@ -73,102 +74,58 @@ def generate_text_ollama(
 
 def generate_text_gigachat(
     prompt: str,
-    system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    temperature: float = 0.7,
 ) -> str:
     """
-    Генерация текста через GigaChat API.
-    
+    Генерация текста через облачный GigaChat API (тариф Premium).
+
+    Делегирует запрос синхронному GigaChatClient (services/gigachat_client.py,
+    requests): OAuth-токен получается один раз и кэшируется в памяти клиента,
+    модель настраивается через .env (GIGACHAT_TEXT_MODEL: GigaChat-Pro / GigaChat-Max),
+    проверка SSL — через GIGACHAT_VERIFY_SSL.
+
     Args:
         prompt: Пользовательский запрос.
         system_prompt: Системная инструкция для модели.
-    
+        temperature: Температура генерации.
+
     Returns:
         Сгенерированный текст.
-    
+
     Raises:
         RuntimeError: Если не удалось получить токен или сгенерировать ответ.
     """
-    if not settings.gigachat_key or not settings.gigachat_secret:
-        raise RuntimeError("GigaChat credentials не настроены в .env файле")
-    
-    auth_url = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-    chat_url = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
-    
-    # Шаг 1: Получение токена авторизации
-    logger.info("Получение токена авторизации GigaChat")
-    
-    try:
-        auth_response = requests.post(
-            auth_url,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "RqUID": "00000000-0000-0000-0000-000000000000"
-            },
-            data={
-                "scope": "GIGACHAT_API_PERS",
-                "client_id": settings.gigachat_key,
-                "client_secret": settings.gigachat_secret
-            },
-            timeout=30
+    if not is_gigachat_configured():
+        raise RuntimeError(
+            "GigaChat credentials не настроены в .env файле "
+            "(GIGACHAT_CLIENT_ID / GIGACHAT_CLIENT_SECRET)"
         )
-        auth_response.raise_for_status()
-        auth_data = auth_response.json()
-        access_token = auth_data.get("access_token")
-        
-        if not access_token:
-            logger.error("GigaChat не вернул access_token")
-            raise RuntimeError("Не удалось получить access_token от GigaChat")
-            
-        logger.info("Токен GigaChat успешно получен")
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка при получении токена GigaChat: {e}")
-        raise RuntimeError(f"Ошибка авторизации в GigaChat: {e}")
-    
-    # Шаг 2: Запрос к Chat Completions
-    logger.info("Отправка запроса к GigaChat для генерации текста")
-    
+
+    from services.gigachat_client import get_gigachat_client
+
+    # Общий синглтон клиента: креды и verify_ssl берутся из config.py
+    # (settings.gigachat_key/secret -> effective_*, settings.gigachat_verify_ssl),
+    # OAuth-токен кэшируется на уровне процесса и переиспользуется между
+    # текстовыми и графическими генерациями без повторных запросов /oauth.
+    client = get_gigachat_client(
+        client_id=settings.effective_gigachat_client_id,
+        client_secret=settings.effective_gigachat_client_secret,
+        verify_ssl=settings.gigachat_verify_ssl,
+    )
     try:
-        chat_response = requests.post(
-            chat_url,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {access_token}"
-            },
-            json={
-                "model": "GigaChat",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt}
-                ]
-            },
-            timeout=120
+        return client.generate_text(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
         )
-        chat_response.raise_for_status()
-        chat_data = chat_response.json()
-        
-        choices = chat_data.get("choices", [])
-        if not choices:
-            logger.warning("GigaChat вернула пустой список choices")
-            return ""
-            
-        text = choices[0].get("message", {}).get("content", "")
-        
-        if not text:
-            logger.warning("GigaChat вернула пустой ответ")
-            return ""
-            
-        logger.info("Успешная генерация текста через GigaChat")
-        return text.strip()
-        
-    except requests.exceptions.Timeout:
-        logger.error("Таймаут при запросе к GigaChat")
-        raise TimeoutError("Превышено время ожидания ответа от GigaChat")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка при запросе к GigaChat: {e}")
-        raise RuntimeError(f"Ошибка генерации текста через GigaChat: {e}")
+    except RuntimeError as e:
+        # GigaChatAuthError / GigaChatAPIError (наследники RuntimeError):
+        # детальные причины (401/429/5xx, неверный scope) уже залогированы в клиенте
+        logger.error(f"Ошибка генерации текста через GigaChat: {e}")
+        raise
     except Exception as e:
-        logger.error(f"Неизвестная ошибка при работе с GigaChat: {e}")
+        logger.error(f"Неизвестная ошибка генерации текста через GigaChat: {e}")
         raise RuntimeError(f"Ошибка генерации текста через GigaChat: {e}")
 
 
@@ -279,12 +236,16 @@ def generate_text(
     use_local: bool = True
 ) -> str:
     """
-    Переключатель между локальной (Ollama) и облачной генерацией текста.
+    Переключатель провайдеров генерации текста.
 
-    Провайдер берётся из таблицы SystemSetting (ключ ai_provider) — это
-    позволяет подключить облачную модель из админ-панели без перезапуска.
-    Если настройка в БД отсутствует, используется аргумент use_local
-    (обратная совместимость): True -> Ollama, False -> GigaChat (из .env).
+    Приоритет выбора:
+    1. Таблица SystemSetting (ключ ai_provider) — настраивается в админ-панели:
+       - "ollama"        -> локальный Ollama;
+       - "cloud"         -> любой OpenAI-совместимый облачный API;
+       - "gigachat"      -> полноценный GigaChat Premium (OAuth + /chat/completions);
+    2. Fallback по .env: если ai_provider не задан, но в config.py настроены
+       GIGACHAT_CLIENT_ID/SECRET и use_local == False — используется GigaChatClient.
+    3. Иначе — обратная совместимость: use_local=True -> Ollama, False -> GigaChat.
 
     Args:
         prompt: Пользовательский запрос.
@@ -297,12 +258,13 @@ def generate_text(
     cfg = _load_dynamic_ai_config() or {}
     provider = (cfg.get("ai_provider") or "").strip().lower()
 
+    try:
+        temp = float(cfg.get("generation_temperature", "0.7"))
+    except ValueError:
+        temp = 0.7
+
     if provider == "cloud":
         logger.info("Используется облачная генерация (настройка из админ-панели)")
-        try:
-            temp = float(cfg.get("generation_temperature", "0.7"))
-        except ValueError:
-            temp = 0.7
         return generate_text_cloud(
             prompt,
             system_prompt,
@@ -312,9 +274,29 @@ def generate_text(
             temperature=temp,
         )
 
+    if provider == "gigachat":
+        # Полноценная интеграция GigaChat Premium: имя модели можно переопределить
+        # из админки (ключ gigachat_text_model), иначе берётся из config.py
+        logger.info("Используется облачная генерация (GigaChat Premium)")
+        from services.gigachat_client import get_gigachat_client
+
+        client = get_gigachat_client()
+        gc_model = (cfg.get("gigachat_text_model") or "").strip() or None
+        return client.generate_text(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temp,
+            model=gc_model,
+        )
+
     if provider == "ollama":
         logger.info("Используется локальная генерация (Ollama, настройка из админ-панели)")
         return generate_text_ollama(prompt, system_prompt)
+
+    # ai_provider не настроен в БД: fallback на настройки из .env
+    if not use_local and is_gigachat_configured():
+        logger.info("Используется облачная генерация (GigaChat, креды из .env)")
+        return generate_text_gigachat(prompt, system_prompt, temperature=temp)
 
     # Обратная совместимость: поведение до появления SystemSetting
     if use_local:
@@ -322,4 +304,4 @@ def generate_text(
         return generate_text_ollama(prompt, system_prompt)
     else:
         logger.info("Используется облачная генерация (GigaChat)")
-        return generate_text_gigachat(prompt, system_prompt)
+        return generate_text_gigachat(prompt, system_prompt, temperature=temp)

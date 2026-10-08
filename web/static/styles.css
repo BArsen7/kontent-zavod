@@ -198,11 +198,12 @@ textarea { resize: vertical; }
    которого не было в этом stylesheet — кнопка рендерилась без фона (сливалась с
    фоном таблицы), а белый текст становился нечитаемым. Тёмный amber + фолбэк .btn-block. */
 .bg-amber-700 { background-color: #b45309; }
-.btn-block { background-color: #b45309; color: #fff; }
+.btn-block { background-color: #b45309; color: #000; } /* FIX (UI): текст кнопок «Заблокировать» — чёрный */
 /* FIX (UI): классы кнопок «Разблокировать» и бейджей статуса (emerald). */
 .bg-emerald-100 { background-color: #d1fae5; }
 .bg-emerald-600 { background-color: #059669; }
 .text-emerald-800 { color: #065f46; }
+.text-black { color: #000; } /* FIX (UI): чёрный текст кнопок «Заблокировать»/«Разблокировать» */
 
 /* FIX (UI): tailwind v3 синтаксис bg-black bg-opacity-50 больше не работает без
    CSS-переменных --tw-bg-opacity — модалка была полностью непрозрачной.

@@ -8,6 +8,24 @@ from generators.text_generator import generate_text
 
 logger = logging.getLogger(__name__)
 
+
+def _default_use_local(db: Session) -> bool:
+    """Читает настройку ai_provider из SystemSetting.
+
+    True — локальный Ollama; False — облачный провайдер (cloud/gigachat).
+    При недоступности БД — безопасный fallback: локальная модель.
+    """
+    try:
+        from models import SystemSetting
+
+        row = db.query(SystemSetting).filter(SystemSetting.key == "ai_provider").first()
+        provider = (row.value or "").strip().lower() if row else "ollama"
+        return provider not in ("cloud", "gigachat")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"Не удалось прочитать ai_provider: {e}")
+        return True
+
+
 # Системный промпт для контент-менеджера
 CONTENT_MANAGER_SYSTEM_PROMPT = """Ты — персональный контент-менеджер и маркетолог для ведения социальных сетей. 
 Твоя задача — помочь пользователю создать эффективный контент-план для его сообщества.
@@ -213,10 +231,12 @@ def generate_ai_response(
     
     # Генерируем ответ через ИИ
     try:
+        # FIX: провайдер выбирается по системной настройке ai_provider
+        # (ollama | cloud | gigachat), а не жёстко Ollama.
         response = generate_text(
             prompt=context,
             system_prompt=CONTENT_MANAGER_SYSTEM_PROMPT,
-            use_local=True
+            use_local=_default_use_local(db),
         )
         
         # Сохраняем сообщение пользователя и ответ ИИ
@@ -328,7 +348,7 @@ def generate_content_plan_from_chat(
         ai_response = generate_text(
             prompt=prompt,
             system_prompt="Ты эксперт по контент-маркетингу. Верни ТОЛЬКО JSON без дополнительного текста.",
-            use_local=True
+            use_local=_default_use_local(db),
         )
         
         # Парсим JSON ответ
