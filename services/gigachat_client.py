@@ -446,7 +446,8 @@ class GigaChatClient:
             token = self.get_token(force_refresh=(attempt == 2))
             headers = {
                 "Authorization": f"Bearer {token}",
-                "Accept": "image/jpeg",
+                "Accept": "application/jpg",          # Исправлено согласно док. Сбера
+                "X-Client-ID": self.client_id,        # КРИТИЧЕСКИ ВАЖНО: без этого шлюз вернет 403
             }
             try:
                 resp = requests.get(
