@@ -65,6 +65,8 @@ class GigaChatClient:
         self.base_url = (base_url or settings.gigachat_base_url).rstrip("/")
         self.text_model = text_model or settings.gigachat_text_model
         self.image_model = image_model or settings.gigachat_image_model
+        # Проверка SSL (GIGACHAT_VERIFY_SSL=false — только для отладки)
+        self.verify_ssl = settings.gigachat_verify_ssl
 
         # Кэш токена (инкапсулирован в экземпляре, без глобальных переменных)
         self._access_token: Optional[str] = None
@@ -117,7 +119,7 @@ class GigaChatClient:
             logger.info("GigaChat: запрашивающий новый OAuth-токен по адресу %s", url)
 
             try:
-                async with httpx.AsyncClient(timeout=30) as client:
+                async with httpx.AsyncClient(timeout=30, verify=self.verify_ssl) as client:
                     resp = await client.post(
                         url,
                         headers=self._get_auth_headers(),
@@ -193,7 +195,7 @@ class GigaChatClient:
                 "X-Client-ID": self.client_id,
             }
             try:
-                async with httpx.AsyncClient(timeout=timeout) as client:
+                async with httpx.AsyncClient(timeout=timeout, verify=self.verify_ssl) as client:
                     resp = await client.request(method, url, headers=headers, json=json_body)
             except httpx.TimeoutException as e:
                 logger.error("GigaChat %s: таймаут запроса к %s", path, url)

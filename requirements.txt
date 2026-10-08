@@ -1,11 +1,30 @@
+# --- Core web framework ---
 fastapi
 uvicorn[standard]
-sqlalchemy
-pydantic-settings
-python-dotenv
-requests
+
+# --- Templating & static files ---
 jinja2
 python-multipart
+
+# --- Settings / env ---
+pydantic
+pydantic-settings
+python-dotenv
+
+# --- Database (SQLite) ---
+sqlalchemy
+
+# --- HTTP clients ---
+# requests: синхронные вызовы (Ollama, старые скрипты)
+# httpx: асинхронный клиент GigaChat API (services/gigachat_client.py)
+requests
+httpx>=0.24
+
+# --- Background scheduler ---
 apscheduler
+
+# --- VK API ---
 vk-api>=11.9.9
+
+# --- Password hashing ---
 bcrypt

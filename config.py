@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     gigachat_text_model: str = "GigaChat-Pro"
     gigachat_image_model: str = "GigaChat"
     gigachat_base_url: str = "https://gigachat.devices.sberbank.ru/api/v1"
+    # Проверка SSL-сертификата при запросах к GigaChat API.
+    # Отключайте только для отладки (например, самоподписанные цепочки).
+    gigachat_verify_ssl: bool = True
 
     @property
     def effective_gigachat_client_id(self) -> str:
