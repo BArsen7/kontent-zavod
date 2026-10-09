@@ -263,7 +263,7 @@
                     <td class="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">${(post.text_final || post.text_draft || '').substring(0, 60)}...</td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm">
                         ${post.image_url ? 
-                            `<span class="text-green-600">✓ Есть</span>` : 
+                            `<a href="${post.image_url}" target="_blank" title="Открыть изображение в новой вкладке"><img src="${post.image_url}" alt="Изображение поста #${post.id}" class="h-12 w-12 object-cover rounded border border-gray-300 hover:opacity-80 transition" onerror="this.closest('a').outerHTML='<span class=&quot;text-red-500&quot;>⚠ Файл не найден</span>'"></a>` : 
                             `<span class="text-gray-400">Нет</span>`}
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap">${getStatusBadge(post.status)}</td>
@@ -585,9 +585,39 @@
             // Здесь можно добавить логику фильтрации постов по сообществу
         });
 
+        // FIX (UX): восстановление статуса активной генерации после перезагрузки
+        // страницы/открытия в новой вкладке. Без этого task_id терялся, и пользователь
+        // не видел ни прогресса, ни результата — посты «исчезали» из виду, хотя
+        // сервер успешно их генерировал и сохранял в БД.
+        async function restoreGeneration() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/generate/active`);
+                if (!resp.ok) return;
+                const st = await resp.json();
+                if (st.status === 'running' && st.task_id) {
+                    setGenUI(true, `Генерация: ${st.created || 0}/${st.total || 7} постов...`);
+                    showToast('Обнаружена активная генерация — восстанавливаю прогресс.');
+                    pollGenerateStatus(st.task_id, st.total || 7);
+                } else if (st.status === 'completed' && st.task_id) {
+                    // Задача завершилась, пока страница была закрыта — показываем результат.
+                    const created = st.created ?? 0;
+                    const failed = st.failed ?? 0;
+                    showToast(
+                        failed > 0
+                            ? `Прошлая генерация завершена: создано ${created} постов, с ошибками: ${failed}.`
+                            : `Прошлая генерация завершена! Создано ${created} постов.`,
+                        created === 0
+                    );
+                    loadPosts();
+                }
+            } catch (e) {
+                console.warn('[restoreGeneration] Не удалось получить активную задачу:', e);
+            }
+        }
+
         // Инициализация
         document.addEventListener('DOMContentLoaded', () => {
-            initApp();  // FIX: параллельная загрузка данных вместо каскада await
+            initApp().then(() => restoreGeneration());  // FIX: восстановить прогресс генерации после перезагрузки
         });
     </script>
 </body>
