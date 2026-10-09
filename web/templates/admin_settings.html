@@ -310,6 +310,12 @@
         });
     }
 
+    function escapeHtml(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
     function testGigaChatImage() {
         const box = document.getElementById('test-result');
         const btn = document.getElementById('btn-test-image');
@@ -322,11 +328,17 @@
                 btn.disabled = false;
                 if (status === 200 && body.ok) {
                     box.classList.add('bg-green-100');
-                    box.innerHTML = '✅ Изображение сохранено: <b>' + (body.path || '') + '</b>';
+                    // Показываем результат генерации: саму картинку + путь к файлу.
+                    let html = '✅ Изображение сгенерировано:';
+                    if (body.web_url) {
+                        html += '<div class="mt-2"><img src="' + escapeHtml(body.web_url) +
+                                '" alt="Тестовое изображение GigaChat" class="max-w-xs rounded-md border border-gray-300 shadow-sm"></div>';
+                    }
+                    html += '<div class="mt-2 text-xs text-gray-600">Файл: <b>' + escapeHtml(body.path || '') + '</b></div>';
+                    box.innerHTML = html;
                 } else {
-                    btn.disabled = false;
                     box.classList.add('bg-red-100');
-                    box.innerHTML = '❌ Ошибка: ' + (body.detail || 'неизвестная ошибка');
+                    box.innerHTML = '❌ Ошибка: ' + escapeHtml(body.detail || 'неизвестная ошибка');
                 }
             })
             .catch(err => {
@@ -338,20 +350,31 @@
 
     function testCloud() {
         const box = document.getElementById('test-result');
+        const btn = document.getElementById('btn-test-cloud');
         box.classList.remove('hidden', 'bg-green-100', 'bg-red-100');
         box.textContent = 'Проверяю подключение…';
+        btn.disabled = true;
         fetch('/admin/settings/test-cloud', { method: 'POST' })
-            .then(r => r.json().then(j => ({ status: r.status, body: j })))
+            .then(r => {
+                // Бэкенд отдаёт JSON как при успехе (200), так и при ошибке (400).
+                return r.json()
+                    .then(j => ({ status: r.status, body: j }))
+                    .catch(() => ({ status: r.status, body: {} }));
+            })
             .then(({ status, body }) => {
+                btn.disabled = false;
                 if (status === 200 && body.ok) {
                     box.classList.add('bg-green-100');
-                    box.innerHTML = '✅ Подключение успешно. Ответ модели: <b>' + (body.reply || '') + '</b>';
+                    // Показываем не только статус, но и текст, полученный от модели.
+                    box.innerHTML = '✅ Подключение успешно. Ответ модели:<br>' +
+                        '<span class="font-semibold">' + escapeHtml(body.reply || '(пустой ответ)') + '</span>';
                 } else {
                     box.classList.add('bg-red-100');
-                    box.innerHTML = '❌ Ошибка: ' + (body.detail || 'неизвестная ошибка');
+                    box.innerHTML = '❌ Ошибка: ' + escapeHtml(body.detail || ('неизвестная ошибка (HTTP ' + status + ')'));
                 }
             })
             .catch(err => {
+                btn.disabled = false;
                 box.classList.add('bg-red-100');
                 box.textContent = '❌ Сетевая ошибка: ' + err;
             });
