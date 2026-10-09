@@ -1,6 +1,6 @@
-# Compiled Python files
+# Compiled/Binary files
 __pycache__/
 *.pyc
 
-# Environment variables
-.env
+# Database files
+data/*.db
