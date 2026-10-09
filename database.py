@@ -145,6 +145,19 @@ def _migrate_block_fields(conn) -> None:
     _add_column_if_missing(conn, "user_communities", "blocked_reason", "VARCHAR(500)")
 
 
+def _migrate_posts_table(conn) -> None:
+    """
+    Лёгкая миграция таблицы posts (аналитика).
+
+    Добавляет колонку `vk_post_id` (ID записи VK в стене из ответа wall.post),
+    если она отсутствует в существующей базе SQLite. Без неё SQLAlchemy падает
+    с OperationalError «no such column: posts.vk_post_id» при любом SELECT из
+    posts (например, GET /api/posts). Колонка nullable — старые посты остаются
+    без привязки до первой публикации/импорта метрик.
+    """
+    _add_column_if_missing(conn, "posts", "vk_post_id", "INTEGER")
+
+
 def init_db():
     """Инициализация базы данных: миграции и создание всех таблиц.
 
@@ -187,6 +200,10 @@ def init_db():
     try:
         with engine.begin() as conn:
             _migrate_block_fields(conn)
+            # FIX (500 на GET /api/posts, «no such column: posts.vk_post_id»):
+            # у существующих БД таблица posts создана до появления аналитики —
+            # добавляем недостающую колонку vk_post_id.
+            _migrate_posts_table(conn)
     except Exception as e:  # noqa: BLE001 — миграция не должна ронять приложение
         print(f"[migration] Этап миграции блокировок пропущен: {type(e).__name__}: {e}")
 
