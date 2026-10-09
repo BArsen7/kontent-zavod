@@ -892,14 +892,16 @@ async def admin_settings_test_cloud(
         try:
             reply = await asyncio.to_thread(
                 client.generate_text,
-                prompt="ping",
+                prompt="Напиши короткое приветствие одним предложением.",
                 system_prompt="",
                 temperature=cfg["generation_temperature"],
-                max_tokens=5,
+                # FIX: увеличен лимит токенов (60 -> 200), чтобы тест показывал
+                # развёрнутый ответ модели, а не обрезанное предложение.
+                max_tokens=200,
                 model=(cfg["gigachat_text_model"] or "").strip() or None,
             )
             logger.info(f"[admin] {admin.email}: тест GigaChat успешен")
-            return JSONResponse({"ok": True, "reply": (reply or "(пустой ответ)")[:200]})
+            return JSONResponse({"ok": True, "reply": (reply or "(пустой ответ)")[:1000]})
         except Exception as e:  # noqa: BLE001 — показываем админу суть ошибки
             logger.warning(f"[admin] {admin.email}: тест GigaChat не удался: {e}")
             return JSONResponse({"ok": False, "detail": str(e)[:300]}, status_code=400)
@@ -924,8 +926,11 @@ async def admin_settings_test_cloud(
     url = f"{cfg['cloud_api_base_url']}/chat/completions"
     body = {
         "model": cfg["cloud_text_model"],
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 5,
+        "messages": [
+            {"role": "user", "content": "Напиши короткое приветствие одним предложением."}
+        ],
+        # FIX: увеличен лимит токенов (60 -> 200) для более полного ответа в тесте.
+        "max_tokens": 200,
         "temperature": cfg["generation_temperature"],
     }
     try:
@@ -937,7 +942,7 @@ async def admin_settings_test_cloud(
             or "(пустой ответ)"
         )
         logger.info(f"[admin] {admin.email}: тест облачной модели успешен")
-        return JSONResponse({"ok": True, "reply": reply[:200]})
+        return JSONResponse({"ok": True, "reply": reply[:1000]})
     except Exception as e:  # noqa: BLE001 — показываем админу суть ошибки
         logger.warning(f"[admin] {admin.email}: тест облачной моделине удался: {e}")
         return JSONResponse({"ok": False, "detail": str(e)[:300]}, status_code=400)
@@ -980,7 +985,9 @@ async def admin_settings_test_gigachat_image(
             cfg.get("gigachat_text_model", ""),
         )
         logger.info(f"[admin] {admin.email}: тест генерации изображения GigaChat успешен: {path}")
-        return JSONResponse({"ok": True, "path": path})
+        # web_url — путь /media/... для показа картинки прямо в админ-панели
+        # (_to_web_media_path определена ниже в этом модуле, вызывается runtime).
+        return JSONResponse({"ok": True, "path": path, "web_url": _to_web_media_path(path)})
     except Exception as e:  # noqa: BLE001 — показываем админу суть ошибки
         logger.warning(f"[admin] {admin.email}: тест изображения GigaChat не удался: {e}")
         return JSONResponse({"ok": False, "detail": str(e)[:300]}, status_code=400)

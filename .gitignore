@@ -1,3 +1,6 @@
 # Python compiled files
 __pycache__/
 *.pyc
+
+# Database files
+data/autopilot.db
