@@ -1199,6 +1199,7 @@ def generate_pack(  # FIX: Event loop unblocked — синхронный роу�
         _PACK_TASKS[task_id] = {
             "status": "running",
             "period_type": period_type,
+            "user_id": current_user.id,  # FIX (UX): для восстановления статуса в UI (/api/generate/active)
             "total": expected_count,
             "created": 0,
             "failed": 0,
@@ -1213,10 +1214,6 @@ def generate_pack(  # FIX: Event loop unblocked — синхронный роу�
             from database import SessionLocal
             db_session = SessionLocal()
             try:
-                def _on_progress(created_i: int, failed_i: int):
-                    # FIX (UX): живой прогресс для polling из UI
-                    _pack_task_update(task_id, created=created_i, failed=failed_i)
-
                 result = generate_weekly_pack(
                     niche="3d_cookies",
                     db=db_session,
@@ -1245,7 +1242,17 @@ def generate_pack(  # FIX: Event loop unblocked — синхронный роу�
                 finished_at=datetime.datetime.now().isoformat(),
             )
 
-    background_tasks.add_task(run_generation)
+    # FIX (UX): раньше использовался BackgroundTasks — его задачи выполняются
+    # СИНХРОННО после отправки HTTP-ответа и до обработки следующего запроса.
+    # Генерация пака идёт минутами, из-за чего все остальные запросы к сайту
+    # («зависший» интерфейс, пустой список постов, таймауты fetch в браузере)
+    # блокировались, и статус генерации на сайте не отображался.
+    # Теперь задача запускается в отдельном потоке — ответ возвращается сразу,
+    # а прогресс доступен через GET /api/generate/status/{task_id}.
+    thread = threading.Thread(
+        target=run_generation, name=f"pack-gen-{task_id}", daemon=True
+    )
+    thread.start()
 
     return {
         "status": "started",
@@ -1269,6 +1276,31 @@ def get_generate_status(
         if task is None:
             return {"status": "unknown", "task_id": task_id}
         return dict(task)
+
+
+@app.get("/api/generate/active")
+def get_active_generate_task(
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Возвращает активную/последнюю задачу генерации текущего пользователя.
+
+    FIX (UX): страница могла быть перезагружена (или открыта в другой вкладке)
+    во время фоновой генерации — task_id терялся, и пользователь не видел ни
+    статуса, ни результата. Этот эндпоинт позволяет UI восстановить прогресс
+    при загрузке страницы.
+    """
+    user = require_auth(request, db)
+    with _PACK_TASKS_LOCK:
+        candidates = [
+            (tid, t) for tid, t in _PACK_TASKS.items()
+            if t.get("user_id") == user.id
+        ]
+    if not candidates:
+        return {"status": "none"}
+    # самая свежая задача по started_at
+    tid, task = max(candidates, key=lambda kv: kv[1].get("started_at") or "")
+    return {"task_id": tid, **task}
 
 
 @app.delete("/api/posts/{post_id}")

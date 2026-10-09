@@ -12,24 +12,48 @@ logger = logging.getLogger(__name__)
 
 
 def _default_use_local(db: Session) -> bool:
-    """True — локальный Ollama; False — облачный провайдер (cloud/gigachat)."""
-    try:
-        row = db.query(SystemSetting).filter(SystemSetting.key == "ai_provider").first()
-        provider = (row.value or "").strip().lower() if row else "ollama"
-        return provider not in ("cloud", "gigachat")
-    except Exception as e:  # noqa: BLE001
-        # FIX: при битой/отсутствующей таблице system_settings обязательно
-        # откатываем сессию — иначе все последующие запросы в ней упадут,
-        # и генерация пакета молча деградирует до локальной модели.
-        logger.warning(
-            f"Не удалось прочитать ai_provider ({type(e).__name__}: {e}) — "
-            "fallback на локальную модель."
-        )
+    """True — локальный Ollama; False — облачный провайдер (cloud/gigachat).
+
+    FIX: раньше при ошибке чтения (например, «no such table: system_settings»)
+    функция молча возвращала True, и генерация пака уходила в локальную Ollama,
+    даже когда в админ-панели выбран GigaChat. Теперь перед fallback выполняется
+    попытка починить схему БД (init_db создаёт/migrит таблицу system_settings),
+    после чего чтение повторяется один раз.
+    """
+    for attempt in (1, 2):
         try:
-            db.rollback()
-        except Exception:  # noqa: BLE001
-            pass
-        return True
+            row = db.query(SystemSetting).filter(SystemSetting.key == "ai_provider").first()
+            provider = (row.value or "").strip().lower() if row else ""
+            if row is None:
+                # FIX: настройки ai_provider вообще нет в БД (например, сохранена
+                # только генерация изображений) — облачный провайдер выбирается
+                # автоматически по настроенным кредам GigaChat, иначе пак молча
+                # генерировался локальной Ollama.
+                from services.gigachat_client import is_gigachat_configured
+                provider = "gigachat" if is_gigachat_configured() else "ollama"
+            return provider not in ("cloud", "gigachat")
+        except Exception as e:  # noqa: BLE001
+            # FIX: при битой/отсутствующей таблице system_settings обязательно
+            # откатываем сессию — иначе все последующие запросы в ней упадут,
+            # и генерация пакета молча деградирует до локальной модели.
+            logger.warning(
+                f"Не удалось прочитать ai_provider ({type(e).__name__}: {e})"
+                + (" — пробую восстановить схему БД и повторить чтение..."
+                   if attempt == 1 else " — fallback на локальную модель.")
+            )
+            try:
+                db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            if attempt == 1:
+                try:
+                    from database import init_db
+                    init_db()
+                    continue
+                except Exception as e2:  # noqa: BLE001
+                    logger.error(f"Восстановление схемы БД не удалось: {e2}")
+            return True
+    return True
 
 
 
