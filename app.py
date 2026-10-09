@@ -126,6 +126,10 @@ templates = Jinja2Templates(directory="web/templates")
 
 # FIX: Tailwind Play CDN -> локальный /static/styles.css — раздача статики
 app.mount("/static", StaticFiles(directory="web/static"), name="static")
+# FIX (UX): раздача сгенерированных изображений из data/media (Post.image_url -> /media/...)
+from pathlib import Path as _Path
+_Path("data/media").mkdir(parents=True, exist_ok=True)
+app.mount("/media", StaticFiles(directory="data/media"), name="media")
 
 # FIX: Ненадёжные сессии в памяти — глобальный словарь _session_store удалён.
 # Сессии хранятся в БД (модель models.Session), что гарантирует их сохранение
@@ -1114,8 +1118,52 @@ def get_posts(
     ]
 
 
+def _to_web_media_path(image_path):
+    """FIX (UX): приводит локальный путь к изображению (data/media/xxx.jpg)
+    к веб-пути /media/xxx.jpg — data/media смонтирован как StaticFiles,
+    иначе картинки сгенерированных постов не отображаются в UI."""
+    if not image_path:
+        return image_path
+    p = str(image_path).replace("\\", "/")
+    if p.startswith("http://") or p.startswith("https://") or p.startswith("/"):
+        return p
+    marker = "data/media/"
+    idx = p.find(marker)
+    if idx != -1:
+        return "/media/" + p[idx + len(marker):]
+    return "/media/" + p.lstrip("./")
+
+
+# --- Фоновая генерация пакетов: трекинг статуса для UI ---
+# task_id -> {status, period_type, total, created, failed, errors, started_at, finished_at}
+_PACK_TASKS: Dict[str, Dict[str, Any]] = {}
+_PACK_TASKS_LOCK = threading.Lock()
+_PACK_TASK_TTL_SECONDS = 60 * 60  # храним статус час после завершения
+
+
+def _pack_task_update(task_id: str, **changes) -> None:
+    """Потокобезопасно обновляет запись о фоновой задаче генерации."""
+    with _PACK_TASKS_LOCK:
+        task = _PACK_TASKS.get(task_id)
+        if task is not None:
+            task.update(changes)
+
+
+def _pack_task_cleanup() -> None:
+    """Удаляет старые завершённые задачи (защита от утечки памяти)."""
+    cutoff = datetime.datetime.now() - datetime.timedelta(seconds=_PACK_TASK_TTL_SECONDS)
+    with _PACK_TASKS_LOCK:
+        stale = [
+            tid for tid, t in _PACK_TASKS.items()
+            if t.get("finished_at") and t["finished_at"] < cutoff
+        ]
+        for tid in stale:
+            _PACK_TASKS.pop(tid, None)
+
+
 @app.post("/api/generate/{period_type}")
-async def generate_pack(
+def generate_pack(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    request: Request,
     period_type: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db)
@@ -1125,8 +1173,12 @@ async def generate_pack(
 
     period_type: 'week' (7 постов), 'two_weeks' (14) или 'month' (30).
     Обратная совместимость: '/api/generate/weekly' == '/api/generate/week'.
-    Возвращает немедленный ответ, не дожидаясь завершения генерации.
+    Возврашает немедленный ответ с task_id; прогресс доступен через
+    GET /api/generate/status/{task_id}.
     """
+    # FIX: Безопасность — генерация доступна только авторизованным пользователям
+    current_user = require_auth(request, db)
+
     if period_type == "weekly":  # обратная совместимость со старым URL
         period_type = "week"
     if period_type not in PACK_PERIODS:
@@ -1136,7 +1188,24 @@ async def generate_pack(
         )
 
     expected_count = len(PACK_PERIODS[period_type]["post_types"])
-    logger.info(f"Получен запрос на генерацию пакета ({period_type}, {expected_count} постов)")
+    logger.info(
+        f"Получен запрос на генерацию пакета ({period_type}, {expected_count} постов) "
+        f"пользователем id={current_user.id}"
+    )
+
+    _pack_task_cleanup()
+    task_id = secrets.token_hex(8)
+    with _PACK_TASKS_LOCK:
+        _PACK_TASKS[task_id] = {
+            "status": "running",
+            "period_type": period_type,
+            "total": expected_count,
+            "created": 0,
+            "failed": 0,
+            "errors": [],
+            "started_at": datetime.datetime.now().isoformat(),
+            "finished_at": None,
+        }
 
     def run_generation(pt: str = period_type):
         try:
@@ -1144,21 +1213,62 @@ async def generate_pack(
             from database import SessionLocal
             db_session = SessionLocal()
             try:
-                result = generate_weekly_pack(niche="3d_cookies", db=db_session, period_type=pt)
-                logger.info(f"Генерация завершена ({pt}). Создано постов: {len(result)}")
+                def _on_progress(created_i: int, failed_i: int):
+                    # FIX (UX): живой прогресс для polling из UI
+                    _pack_task_update(task_id, created=created_i, failed=failed_i)
+
+                result = generate_weekly_pack(
+                    niche="3d_cookies",
+                    db=db_session,
+                    period_type=pt,
+                    user_id=current_user.id,  # FIX: привязка постов к пользователю
+                    progress_cb=_on_progress,
+                )
+                created = len(result)
+                failed = expected_count - created
+                logger.info(f"Генерация завершена ({pt}). Создано постов: {created}")
+                _pack_task_update(
+                    task_id,
+                    status="completed",
+                    created=created,
+                    failed=failed,
+                    finished_at=datetime.datetime.now().isoformat(),
+                )
             finally:
                 db_session.close()
         except Exception as e:
             logger.error(f"Ошибка в фоновой генерации: {e}")
+            _pack_task_update(
+                task_id,
+                status="failed",
+                errors=[str(e)[:300]],
+                finished_at=datetime.datetime.now().isoformat(),
+            )
 
     background_tasks.add_task(run_generation)
 
     return {
         "status": "started",
+        "task_id": task_id,
         "message": "Генерация запущена в фоновом режиме",
         "period_type": period_type,
         "count": expected_count
     }
+
+
+@app.get("/api/generate/status/{task_id}")
+def get_generate_status(
+    task_id: str,
+    request: Request,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Возвращает статус фоновой генерации пакета (для отображения прогресса в UI)."""
+    require_auth(request, db)  # FIX: Безопасность — статус доступен только авторизованным
+    with _PACK_TASKS_LOCK:
+        task = _PACK_TASKS.get(task_id)
+        if task is None:
+            return {"status": "unknown", "task_id": task_id}
+        return dict(task)
 
 
 @app.delete("/api/posts/{post_id}")

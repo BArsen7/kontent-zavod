@@ -46,7 +46,8 @@ def generate_text_ollama(
     logger.info(f"Отправка запроса к Ollama (модель: {model})")
     
     try:
-        response = requests.post(url, json=payload, timeout=120)
+        # FIX: увеличено время ожидания генерации до 5 минут (300 сек)
+        response = requests.post(url, json=payload, timeout=300)
         response.raise_for_status()
         result = response.json()
         text = result.get("response", "")
@@ -184,7 +185,7 @@ def generate_text_cloud(
                 ],
                 "temperature": temperature,
             },
-            timeout=120,
+            timeout=300,  # FIX: увеличено время ожидания генерации до 5 минут
         )
         response.raise_for_status()
         data = response.json()

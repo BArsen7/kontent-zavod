@@ -66,9 +66,11 @@ logger = logging.getLogger(__name__)
 TOKEN_EXPIRY_BUFFER_MS = 60_000
 
 # Жёсткие таймауты из спецификации интеграции
-IMAGE_GENERATION_TIMEOUT = 90   # генерация изображения (chat/completions + function_call)
+# FIX: увеличено время ожидания генерации до 5 минут — GigaChat Premium при
+# high load может отвечать дольше 2 минут, раньше запросы падали по таймауту.
+IMAGE_GENERATION_TIMEOUT = 300  # генерация изображения (chat/completions + function_call)
 FILE_DOWNLOAD_TIMEOUT = 30      # скачивание /files/{id}/content
-TEXT_TIMEOUT = 120              # генерация текста
+TEXT_TIMEOUT = 300              # генерация текста
 AUTH_TIMEOUT = 30               # получение OAuth-токена
 
 # Регулярка для извлечения file_id из ответа модели:

@@ -1,9 +1,9 @@
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 
-from models import ContentPlan, Post, SystemSetting
+from models import ContentPlan, ContentPlanPeriod, Post, SystemSetting
 from generators.text_generator import generate_text
 from generators.image_generator import generate_image
 from config import settings
@@ -31,6 +31,21 @@ def _default_use_local(db: Session) -> bool:
             pass
         return True
 
+
+
+def _to_web_media_path(image_path):
+    """FIX (UX): data/media смонтирован в FastAPI как /media — переводим
+    локальный путь файла в веб-путь, чтобы картинка отображалась в UI."""
+    if not image_path:
+        return image_path
+    p = str(image_path).replace("\\", "/")
+    if p.startswith("http://") or p.startswith("https://") or p.startswith("/"):
+        return p
+    marker = "data/media/"
+    idx = p.find(marker)
+    if idx != -1:
+        return "/media/" + p[idx + len(marker):]
+    return "/media/" + p.lstrip("./")
 
 
 def _image_source_name(path: str) -> str:
@@ -116,6 +131,8 @@ def generate_weekly_pack(
     niche: str = "3d_cookies",
     db: Session = None,
     period_type: str = "week",
+    user_id: Optional[int] = None,
+    progress_cb: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """
     Генерирует контент-пакет для заданной ниши (неделя / 2 недели / месяц).
@@ -124,6 +141,11 @@ def generate_weekly_pack(
         niche: Строка с описанием ниши (пока используется хардкод для выпечки).
         db: Сессия базы данных SQLAlchemy.
         period_type: Тип периода - 'week' (7), 'two_weeks' (14) или 'month' (30 постов).
+        user_id: ID пользователя-владельца пакета. Если передан — создаётся
+            ContentPlanPeriod и посты привязываются к нему; иначе посты не
+            видны в списке /api/posts (фильтр по ContentPlanPeriod.user_id).
+        progress_cb: Необязательная callback-функция progress_cb(created, failed)
+            — вызывается после каждого поста для отображения прогресса в UI.
         
     Returns:
         Список словарей с информацией о созданных постах.
@@ -169,7 +191,39 @@ def generate_weekly_pack(
     else:
         logger.info(f"Используем существующий контент-план ID: {content_plan.id}")
 
+    # FIX (UX): привязка постов к периоду контент-плана пользователя.
+    # Без ContentPlanPeriod посты остаются «сиротами» и не отображаются в
+    # списке /api/posts (фильтр по ContentPlanPeriod.user_id == current_user.id).
+    period_id: Optional[int] = None
+    if user_id is not None:
+        try:
+            plan_period = ContentPlanPeriod(
+                user_id=user_id,
+                period_type=period_type,
+                start_date=now,
+                end_date=now + timedelta(days=days),
+                status="draft",
+                title=f"Автопак: {niche} ({period_type})",
+                created_at=now,
+            )
+            db.add(plan_period)
+            db.commit()
+            db.refresh(plan_period)
+            period_id = plan_period.id
+            logger.info(f"Создан период контент-плана id={period_id} для user_id={user_id}")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Не удалось создать ContentPlanPeriod: {e}")
+            db.rollback()
+
     created_posts = []
+    _failed_count = 0
+
+    def _notify_progress():
+        if progress_cb is not None:
+            try:
+                progress_cb(len(created_posts), _failed_count)
+            except Exception:  # noqa: BLE001
+                pass
 
     for i, post_type in enumerate(post_types):
         try:
@@ -209,11 +263,12 @@ def generate_weekly_pack(
             # Создаём запись в БД
             new_post = Post(
                 content_plan_id=content_plan.id,
+                content_plan_period_id=period_id,
                 post_type=post_type,
                 topic=user_prompt[:50], # Короткая тема
                 text_draft=text_content,
                 text_final=text_content, # Изначально черновик = финал
-                image_url=image_path, # Локальный путь
+                image_url=_to_web_media_path(image_path), # FIX (UX): веб-путь /media/... для показа картинок в UI
                 image_source=_image_source_name(image_path) if image_path else None,
                 status="draft",
                 publish_at=now + timedelta(days=(i * days) // num_posts), # Примерное время публикации
@@ -234,9 +289,13 @@ def generate_weekly_pack(
                 "has_image": image_path is not None
             })
             
+            _notify_progress()
+
         except Exception as e:
+            _failed_count += 1
             logger.error(f"Критическая ошибка при генерации поста {i+1}: {e}")
             # Не прерываем весь цикл, пытаемся сделать остальные
+            _notify_progress()
             continue
 
     logger.info(f"Генерация завершена. Создано постов: {len(created_posts)}")
