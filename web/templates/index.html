@@ -290,32 +290,93 @@
         }
 
         // Действия
-        async function generateWeekly() {
+        let genPollTimer = null;
+
+        function setGenUI(running, text) {
             const btn = document.getElementById('genBtn');
             const loader = document.getElementById('genLoader');
             const btnText = document.getElementById('genBtnText');
-            
-            btn.disabled = true;
-            loader.classList.remove('hidden');
-            btnText.textContent = 'Генерация...';
-            
+            btn.disabled = running;
+            loader.classList.toggle('hidden', !running);
+            btnText.textContent = text;
+        }
+
+        async function generateWeekly() {
+            setGenUI(true, 'Генерация запущена...');
+
             try {
-                const response = await fetch(`${API_BASE}/api/generate/weekly`, { method: 'POST' });
+                const response = await fetch(`${API_BASE}/api/generate/week`, { method: 'POST' });
                 const result = await response.json();
-                
-                if (response.ok) {
-                    showToast(`Запущена генерация ${result.count || 7} постов!`);
-                    setTimeout(loadPosts, 2000); // Обновить через 2 сек
-                } else {
-                    throw new Error(result.detail || 'Ошибка генерации');
+
+                if (!response.ok) {
+                    // FIX: detail может быть объектом (валидация FastAPI) — приводим к строке
+                    const d = result && result.detail;
+                    throw new Error(typeof d === 'string' ? d : JSON.stringify(d || 'Ошибка генерации'));
                 }
+
+                showToast(`Генерация запущена (${result.count || 7} постов). Это может занять до 5 минут на пост...`);
+                pollGenerateStatus(result.task_id, result.count || 7);
             } catch (error) {
                 showToast(error.message, true);
-            } finally {
-                btn.disabled = false;
-                loader.classList.add('hidden');
-                btnText.textContent = '✨ Сгенерировать пак на неделю';
+                setGenUI(false, '✨ Сгенерировать пак на неделю');
             }
+        }
+
+        // FIX (UX): polling статуса фоновой генерации — пользователь видит прогресс,
+        // а не «молчаливое» ожидание. Промежуточное обновление списка постов каждые ~30 сек.
+        function pollGenerateStatus(taskId, expectedTotal) {
+            if (genPollTimer) clearTimeout(genPollTimer);
+            if (!taskId) { setTimeout(loadPosts, 3000); return; }
+
+            const startedAt = Date.now();
+            const MAX_MS = 6 * 60 * 60 * 1000; // запас: 30 постов x 5 мин (обработка идёт последовательно)
+            let interimCounter = 0;
+
+            const tick = async () => {
+                genPollTimer = null;
+                try {
+                    const resp = await fetch(`${API_BASE}/api/generate/status/${taskId}`);
+                    const st = await resp.json();
+
+                    if (st.status === 'running') {
+                        setGenUI(true, `Генерация: ${st.created || 0}/${st.total || expectedTotal} постов...`);
+                        // Промежуточно обновляем таблицу и статистику каждые ~30 сек
+                        if (++interimCounter % 6 === 0) loadPosts();
+                        if (Date.now() - startedAt > MAX_MS) {
+                            showToast('Генерация всё ещё идёт — результат появится в списке постов автоматически.', false);
+                            setGenUI(false, '✨ Сгенерировать пак на неделю');
+                            return;
+                        }
+                        genPollTimer = setTimeout(tick, 5000);
+                        return;
+                    }
+
+                    // Завершено (completed / failed / unknown)
+                    if (st.status === 'completed') {
+                        const created = st.created ?? 0;
+                        const failed = st.failed ?? 0;
+                        showToast(
+                            failed > 0
+                                ? `Генерация завершена: создано ${created} постов, с ошибками: ${failed}.`
+                                : `Генерация завершена! Создано ${created} постов.`,
+                            created === 0
+                        );
+                    } else if (st.status === 'failed') {
+                        showToast('Генерация завершилась с ошибкой: ' + ((st.errors && st.errors[0]) || 'подробности в логах сервера'), true);
+                    } else {
+                        showToast('Статус задачи недоступен (сервер мог быть перезапущен). Обновляю список постов.');
+                    }
+
+                    setGenUI(false, '✨ Сгенерировать пак на неделю');
+                    await loadPosts();
+                } catch (e) {
+                    setGenUI(false, '✨ Сгенерировать пак на неделю');
+                    showToast('Не удалось получить статус генерации: ' + e.message, true);
+                    loadPosts();
+                }
+            };
+
+            genPollTimer = setTimeout(tick, 4000);
         }
 
         async function approvePost(postId) {
