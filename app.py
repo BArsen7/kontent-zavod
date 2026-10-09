@@ -895,7 +895,9 @@ async def admin_settings_test_cloud(
                 prompt="Напиши короткое приветствие одним предложением.",
                 system_prompt="",
                 temperature=cfg["generation_temperature"],
-                max_tokens=60,
+                # FIX: увеличен лимит токенов (60 -> 200), чтобы тест показывал
+                # развёрнутый ответ модели, а не обрезанное предложение.
+                max_tokens=200,
                 model=(cfg["gigachat_text_model"] or "").strip() or None,
             )
             logger.info(f"[admin] {admin.email}: тест GigaChat успешен")
@@ -927,7 +929,8 @@ async def admin_settings_test_cloud(
         "messages": [
             {"role": "user", "content": "Напиши короткое приветствие одним предложением."}
         ],
-        "max_tokens": 60,
+        # FIX: увеличен лимит токенов (60 -> 200) для более полного ответа в тесте.
+        "max_tokens": 200,
         "temperature": cfg["generation_temperature"],
     }
     try:
