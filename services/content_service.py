@@ -1,9 +1,18 @@
 import logging
+import random
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 
-from models import ContentPlan, ContentPlanPeriod, Post, SystemSetting
+from models import (
+    CommunityContext,
+    ContentPlan,
+    ContentPlanPeriod,
+    HistoricalPost,
+    MarketingStrategy,
+    Post,
+    SystemSetting,
+)
 from generators.text_generator import generate_text
 from generators.image_generator import generate_image
 from config import settings
@@ -151,12 +160,110 @@ PACK_PERIODS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _build_community_context_block(db: Session, community_id: Optional[int]) -> str:
+    """Формирует few-shot блок из данных сообщества для промпта генерации.
+
+    Собирает: CommunityContext (tone of voice, ЦА, УТП), MarketingStrategy
+    (рубрики) и 1-2 случайных топовых исторических поста (is_top_performer).
+
+    Возвращает пустую строку, если community_id не передан или данных нет —
+    тогда генерация проходит по прежним (хардкодным) промптам, обратная
+    совместимость сохраняется.
+    """
+    if community_id is None:
+        return ""
+
+    try:
+        context = (
+            db.query(CommunityContext)
+            .filter(CommunityContext.community_id == community_id)
+            .order_by(CommunityContext.updated_at.desc())
+            .first()
+        )
+        strategy = (
+            db.query(MarketingStrategy)
+            .filter(MarketingStrategy.community_id == community_id)
+            .first()
+        )
+        top_posts = (
+            db.query(HistoricalPost)
+            .filter(
+                HistoricalPost.community_id == community_id,
+                HistoricalPost.is_top_performer.is_(True),
+            )
+            .all()
+        )
+    except Exception as e:  # noqa: BLE001 — доп. контекст не должен ломать генерацию
+        logger.warning(f"Не удалось загрузить контекст сообщества id={community_id}: {e}")
+        return ""
+
+    parts: List[str] = []
+
+    if context is not None:
+        if context.tone_of_voice:
+            parts.append(f"При генерации строго придерживайся стиля: {context.tone_of_voice}.")
+        if context.target_audience:
+            parts.append(f"Твоя ЦА: {context.target_audience}.")
+        if context.usp:
+            parts.append(f"УТП сообщества: {context.usp}.")
+        if context.insights_summary:
+            parts.append(f"Учти аналитические инсайты: {context.insights_summary}.")
+
+    if strategy is not None:
+        rubrics_text = _format_rubrics(strategy.rubrics)
+        if rubrics_text:
+            parts.append(f"Используй рубрики: {rubrics_text}.")
+        pillars = strategy.content_pillars
+        if isinstance(pillars, list) and pillars:
+            parts.append("Смысловые блоки стратегии: " + ", ".join(str(p) for p in pillars) + ".")
+
+    if top_posts:
+        samples = random.sample(top_posts, k=min(2, len(top_posts)))
+        for idx, sample in enumerate(samples, start=1):
+            text = (sample.text or "").strip().replace("\n", " ")
+            if len(text) > 500:
+                text = text[:500] + "…"
+            if text:
+                parts.append(
+                    f"Для вдохновения, вот пример успешного поста этого сообщества "
+                    f"(пример {idx}), используй похожую структуру хука: {text}"
+                )
+
+    if not parts:
+        return ""
+
+    return "\n\nДанные сообщества (строго учитывай при генерации):\n" + "\n".join(parts)
+
+
+def _format_rubrics(rubrics: Any) -> str:
+    """Человекочитаемо форматирует список рубрик из MarketingStrategy.rubrics."""
+    if not isinstance(rubrics, list):
+        return ""
+    rendered: List[str] = []
+    for item in rubrics:
+        if isinstance(item, dict):
+            name = item.get("name", "")
+            description = item.get("description", "")
+            frequency = item.get("frequency", "")
+            chunk = name
+            if description:
+                chunk += f" — {description}"
+            if frequency:
+                chunk += f" ({frequency})"
+            if chunk.strip():
+                rendered.append(chunk.strip())
+        elif item:
+            rendered.append(str(item))
+    return "; ".join(rendered)
+
+
 def generate_weekly_pack(
     niche: str = "3d_cookies",
     db: Session = None,
     period_type: str = "week",
     user_id: Optional[int] = None,
     progress_cb: Optional[Any] = None,
+    community_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Генерирует контент-пакет для заданной ниши (неделя / 2 недели / месяц).
@@ -170,6 +277,11 @@ def generate_weekly_pack(
             видны в списке /api/posts (фильтр по ContentPlanPeriod.user_id).
         progress_cb: Необязательная callback-функция progress_cb(created, failed)
             — вызывается после каждого поста для отображения прогресса в UI.
+        community_id: Опциональный ID PlatformAccount сообщества. Если передан —
+            в промпт добавляются AI-паспорт сообщества (CommunityContext),
+            маркетинговая стратегия (MarketingStrategy) и примеры топовых
+            исторических постов (few-shot промптинг). По умолчанию None —
+            обратная совместимость со старыми вызовами.
         
     Returns:
         Список словарей с информацией о созданных постах.
@@ -242,6 +354,16 @@ def generate_weekly_pack(
     created_posts = []
     _failed_count = 0
 
+    # FIX (AI-контекст): few-shot блок из паспорта сообщества, стратегии и
+    # топовых исторических постов. Пустая строка — если community_id не
+    # передан или данных нет (обратная совместимость со старыми промптами).
+    community_block = _build_community_context_block(db, community_id)
+    if community_block:
+        logger.info(
+            f"Генерация с контекстом сообщества id={community_id} "
+            f"(блок промпта: {len(community_block)} симв.)"
+        )
+
     def _notify_progress():
         if progress_cb is not None:
             try:
@@ -260,6 +382,8 @@ def generate_weekly_pack(
             user_prompt = user_prompts_list[i % len(user_prompts_list)]
             
             full_user_prompt = f"{user_prompt} Тематика: {niche}. Отвечай на русском языке."
+            if community_block:
+                full_user_prompt += community_block
             
             # Генерируем текст
             logger.info("Генерация текста...")

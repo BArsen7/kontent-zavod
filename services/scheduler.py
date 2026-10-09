@@ -113,6 +113,16 @@ def check_and_publish():
                     # Обновляем статус в БД
                     post.status = "published"
                     post.published_at = datetime.now()
+                    # FIX (аналитика): сохраняем VK post_id — он нужен задаче
+                    # обновления метрик (wall.getById) раз в 24 часа.
+                    vk_post_id = result.get("post_id")
+                    if vk_post_id is not None:
+                        try:
+                            post.vk_post_id = int(vk_post_id)
+                        except (TypeError, ValueError):
+                            logger.warning(
+                                f"Не удалось сохранить vk_post_id={vk_post_id} для поста ID={post.id}"
+                            )
                     db.commit()
                     
                     logger.info(
@@ -136,6 +146,24 @@ def check_and_publish():
         db.rollback()
     finally:
         db.close()
+
+
+def update_metrics_job() -> None:
+    """Фоновая задача: обновление метрик опубликованных постов из VK.
+
+    Запускается планировщиком раз в 24 часа; вызывает
+    services.vk_analytics_service.update_metrics_for_published_posts()
+    (wall.getById) и обновляет PostStats/HistoricalPost.
+    Все ошибки перехватываются — задача не должна ронять планировщик.
+    """
+    logger.info("Планировщик: запуск задачи обновления метрик постов...")
+    try:
+        from services.vk_analytics_service import update_metrics_for_published_posts
+
+        updated = update_metrics_for_published_posts()
+        logger.info(f"Планировщик: обновление метрик завершено, обновлено постов: {updated}")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"Ошибка в update_metrics_job: {type(e).__name__}: {e}")
 
 
 def start_scheduler():
@@ -173,6 +201,17 @@ def start_scheduler():
         minutes=30,
         id="check_and_publish",
         name="Проверка и публикация постов",
+        replace_existing=True
+    )
+
+    # Задача аналитики: раз в 24 часа обновлять метрики опубликованных
+    # постов из VK (wall.getById) — services/vk_analytics_service.py.
+    _scheduler.add_job(
+        update_metrics_job,
+        trigger="interval",
+        hours=24,
+        id="update_metrics",
+        name="Обновление метрик опубликованных постов VK",
         replace_existing=True
     )
     

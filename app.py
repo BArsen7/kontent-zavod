@@ -1166,6 +1166,7 @@ def generate_pack(  # FIX: Event loop unblocked — синхронный роу�
     request: Request,
     period_type: str,
     background_tasks: BackgroundTasks,
+    community_id: Optional[int] = None,
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
@@ -1173,6 +1174,9 @@ def generate_pack(  # FIX: Event loop unblocked — синхронный роу�
 
     period_type: 'week' (7 постов), 'two_weeks' (14) или 'month' (30).
     Обратная совместимость: '/api/generate/weekly' == '/api/generate/week'.
+    community_id (опционально): ID PlatformAccount — при передаче генерация
+    использует AI-паспорт сообщества, стратегию и топовые исторические посты
+    (few-shot промптинг).
     Возврашает немедленный ответ с task_id; прогресс доступен через
     GET /api/generate/status/{task_id}.
     """
@@ -1220,6 +1224,7 @@ def generate_pack(  # FIX: Event loop unblocked — синхронный роу�
                     period_type=pt,
                     user_id=current_user.id,  # FIX: привязка постов к пользователю
                     progress_cb=_on_progress,
+                    community_id=community_id,  # AI-контекст сообщества (few-shot)
                 )
                 created = len(result)
                 failed = expected_count - created

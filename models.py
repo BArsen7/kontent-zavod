@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from sqlalchemy import String, Integer, ForeignKey, DateTime, Text, JSON, Boolean
+from sqlalchemy import String, Integer, ForeignKey, DateTime, Text, JSON, Boolean, Float
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database import Base
@@ -114,6 +114,9 @@ class Post(Base):
     content_plan_period_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("content_plan_periods.id"), nullable=True, index=True
     )
+    # ID записи VK в стене (post_id из ответа wall.post), сохраняется при
+    # публикации — используется для обновления метрик через wall.getById.
+    vk_post_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     post_type: Mapped[str] = mapped_column(String(50), nullable=False)
     topic: Mapped[str] = mapped_column(String(255), nullable=False)
     text_draft: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -212,3 +215,72 @@ class SystemSetting(Base):
     key: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     value: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CommunityContext(Base):
+    """AI-паспорт сообщества: ЦА, тон общения, УТП и инсайты по аналитике постов.
+
+    Формируется сервисом services/context_strategy_service.py на основе
+    описания группы и исторических постов (HistoricalPost) и используется
+    при генерации контента (few-shot промптинг).
+    """
+
+    __tablename__ = "community_contexts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    community_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("platform_accounts.id"), nullable=False, index=True
+    )
+    target_audience: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    tone_of_voice: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    usp: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    insights_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+
+class HistoricalPost(Base):
+    """Исторический пост VK, импортированный через wall.get, с метриками и ER.
+
+    engagement_rate считается по формуле:
+      (likes + comments + shares) / views, при views == 0 — / members_count.
+    is_top_performer выставляется по порогу топ-15% ER среди постов сообщества.
+    """
+
+    __tablename__ = "historical_posts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    community_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("platform_accounts.id"), nullable=False, index=True
+    )
+    vk_post_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False, index=True)
+    text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    published_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    views: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    likes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    shares: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    comments: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    engagement_rate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    is_top_performer: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
+class MarketingStrategy(Base):
+    """Контент-стратегия сообщества, сгенерированная LLM из CommunityContext.
+
+    rubrics и content_pillars хранятся как JSON (списки/объекты),
+    posting_schedule — человекочитаемая строка-рекомендация.
+    """
+
+    __tablename__ = "marketing_strategies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    community_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("platform_accounts.id"), unique=True, nullable=False, index=True
+    )
+    rubrics: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    content_pillars: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    posting_schedule: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
