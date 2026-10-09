@@ -10,7 +10,7 @@
 </p>
 
 <div class="bg-white rounded-lg shadow p-6 max-w-2xl mb-6">
-    <form method="POST" action="/admin/settings" class="space-y-5">
+    <form id="settings-form" method="POST" action="/admin/settings" class="space-y-5" novalidate>
 
         <!-- Выбор провайдера -->
         <div>
@@ -56,7 +56,7 @@
             <h2 class="text-lg font-semibold text-gray-800">🖥️ Локальный Ollama</h2>
             <div>
                 <label class="block text-sm font-medium text-gray-600 mb-1">Базовый URL Ollama</label>
-                <input type="url" name="ollama_base_url" value="{{ values.ollama_base_url }}"
+                <input type="text" name="ollama_base_url" value="{{ values.ollama_base_url }}"
                        placeholder="http://localhost:11434"
                        class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
                 <p class="text-xs text-gray-400 mt-1">Fallback: settings.ollama_url (config.py)</p>
@@ -101,7 +101,7 @@
             <h2 class="text-lg font-semibold text-gray-800">☁️ Облачные модели</h2>
             <div>
                 <label class="block text-sm font-medium text-gray-600 mb-1">Базовый URL API облака</label>
-                <input type="url" name="cloud_api_base_url" value="{{ values.cloud_api_base_url }}"
+                <input type="text" name="cloud_api_base_url" value="{{ values.cloud_api_base_url }}"
                        placeholder="https://openrouter.ai/api/v1"
                        class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
                 <p class="text-xs text-gray-400 mt-1">
@@ -187,10 +187,11 @@
         </div>
 
         <div class="flex items-center gap-4">
-            <button type="submit"
+            <button type="submit" id="btn-save-settings"
                     class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-md transition duration-200">
                 💾 Сохранить настройки
             </button>
+            <span id="save-status" class="text-sm"></span>
         </div>
     </form>
 </div>
@@ -219,6 +220,9 @@
 </div>
 
 <script>
+    // Флаг конфигурации GigaChat (креды в .env) для клиентской валидации формы.
+    window.GIGACHAT_CONFIGURED = {{ 'true' if gigachat_configured else 'false' }};
+
     function toggleProvider() {
         const radios = document.getElementsByName('ai_provider');
         let provider = 'ollama';
@@ -239,7 +243,72 @@
     document.addEventListener('DOMContentLoaded', () => {
         toggleProvider();
         toggleImageProvider();
+        initSettingsForm();
     });
+
+    // FIX: отправка формы настроек через fetch + явная валидация.
+    // Ранее браузер молча блокировал submit из-за нативной HTML5-валидации
+    // скрытых input[type=url] (пустое значение), и кнопка «Сохранить
+    // настройки» ничего не делала без каких-либо сообщений.
+    function initSettingsForm() {
+        const form = document.getElementById('settings-form');
+        if (!form) return;
+        const status = document.getElementById('save-status');
+        const btn = document.getElementById('btn-save-settings');
+
+        function setStatus(text, ok) {
+            status.textContent = text;
+            status.className = 'text-sm ' + (ok ? 'text-green-600' : 'text-red-600');
+        }
+
+        form.addEventListener('submit', (event) => {
+            event.preventDefault();
+
+            const data = new FormData(form);
+            data.append('ajax', '1');
+
+            const provider = data.get('ai_provider') || 'ollama';
+            const imageProvider = data.get('image_provider') || 'kandinsky';
+            const tempRaw = (data.get('generation_temperature') || '').trim();
+            const temp = parseFloat(tempRaw === '' ? '0.7' : tempRaw);
+
+            // Клиентская валидация — те же правила, что на сервере.
+            if (Number.isNaN(temp) || temp < 0 || temp > 2) {
+                setStatus('❌ Температура генерации должна быть числом от 0.0 до 2.0', false);
+                return;
+            }
+            if (provider === 'cloud') {
+                if (!(data.get('cloud_api_base_url') || '').trim() ||
+                    !(data.get('cloud_text_model') || '').trim()) {
+                    setStatus('❌ Для облачного провайдера обязательны базовый URL API и название модели', false);
+                    return;
+                }
+            }
+            if ((provider === 'gigachat' || imageProvider === 'gigachat') &&
+                !window.GIGACHAT_CONFIGURED) {
+                setStatus('❌ Креды GigaChat не заданы в .env — выберите другой провайдер', false);
+                return;
+            }
+
+            btn.disabled = true;
+            setStatus('Сохраняю…', true);
+
+            fetch('/admin/settings', { method: 'POST', body: data })
+                .then(r => r.json().then(j => ({ status: r.status, body: j })).catch(() => ({ status: r.status, body: {} })))
+                .then(({ status: code, body }) => {
+                    btn.disabled = false;
+                    if (code >= 200 && code < 300 && body.ok) {
+                        setStatus('✅ Настройки сохранены', true);
+                    } else {
+                        setStatus('❌ ' + (body.detail || ('Ошибка сервера (HTTP ' + code + ')')), false);
+                    }
+                })
+                .catch(err => {
+                    btn.disabled = false;
+                    setStatus('❌ Сетевая ошибка: ' + err, false);
+                });
+        });
+    }
 
     function testGigaChatImage() {
         const box = document.getElementById('test-result');

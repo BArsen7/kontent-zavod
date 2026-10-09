@@ -637,7 +637,39 @@ def get_system_setting(db: Session, key: str) -> str:
 
 
 def save_system_settings(db: Session, payload: Dict[str, str]) -> None:
-    """Создаёт или обновляет записи SystemSetting (без перезапуска приложения)."""
+    """Создаёт или обновляет записи SystemSetting (без перезапуска приложения).
+
+    FIX (кнопка «Сохранить настройки» не работала): в старых БД таблица
+    system_settings могла быть создана без колонки updated_at — любая операция
+    ORM (даже SELECT) падала с OperationalError («no such column ...
+    updated_at») и роут завершался 500 ошибкой без применения изменений.
+    Сначала пробуем штатный путь; при ошибке схемы чиним таблицу через
+    init_db()/_repair_system_settings_table() (пересоздание с сохранением
+    key/value) и повторяем запись.
+    """
+    try:
+        for key, value in payload.items():
+            row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
+            if row:
+                row.value = value
+                row.updated_at = datetime.datetime.utcnow()
+            else:
+                db.add(SystemSetting(key=key, value=value))
+        db.commit()
+        return
+    except Exception as e:  # noqa: BLE001 — расхождение схемы старой БД и модели
+        db.rollback()
+        logger.warning(
+            f"[settings] Таблица system_settings имеет устаревшую схему "
+            f"({type(e).__name__}: {e}) — пересоздаём её с сохранением значений"
+        )
+
+    # Самовосстановление: init_db() вызывает _repair_system_settings_table(),
+    # который пересоздаёт таблицу по актуальной модели, сохраняя key/value.
+    from database import init_db
+
+    init_db()
+
     for key, value in payload.items():
         row = db.query(SystemSetting).filter(SystemSetting.key == key).first()
         if row:
@@ -712,23 +744,43 @@ def admin_settings_page(
 
 
 @app.post("/admin/settings")
-def admin_settings_update(
-    ai_provider: str = Form("ollama"),
-    ollama_base_url: str = Form(""),
-    default_text_model: str = Form(""),
-    default_image_model: str = Form(""),
-    generation_temperature: str = Form("0.7"),
-    cloud_api_base_url: str = Form(""),
-    cloud_api_key: str = Form(""),
-    cloud_text_model: str = Form(""),
-    gigachat_text_model: str = Form(""),
-    gigachat_image_model: str = Form(""),
-    gigachat_image_save_dir: str = Form(""),
-    image_provider: str = Form("gigachat"),
+async def admin_settings_update(
+    request: Request,
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """Создаёт или обновляет записи SystemSetting (без перезапуска приложения)."""
+    """Создаёт или обновляет записи SystemSetting (без перезапуска приложения).
+
+    FIX (кнопка «Сохранить настройки» не работала): форма брала значения из
+    скрытых/невидимых секций (input type="url" с пустым значением при
+    выбранном GigaChat/cloud и т.п.) — браузер отклонял нативную валидацию
+    HTML5 и submit молча не происходил. Теперь сервер принимает form-data
+    вручную, а шаблон отправляет форму через fetch с JS-валидацией и
+    понятными сообщениями об ошибках. Дополнительно: input type="url" заменены
+    на type="text" (пустое значение больше не блокирует отправку).
+    """
+    try:
+        form = await request.form()
+    except Exception as e:  # noqa: BLE001 — некорректный/пустой body формы
+        raise HTTPException(status_code=400, detail=f"Не удалось прочитать форму: {e}")
+
+    def _f(name: str, default: str = "") -> str:
+        value = form.get(name)
+        return value.strip() if isinstance(value, str) else default
+
+    ai_provider = _f("ai_provider", "ollama") or "ollama"
+    image_provider = _f("image_provider", "kandinsky") or "kandinsky"
+    ollama_base_url = _f("ollama_base_url")
+    default_text_model = _f("default_text_model")
+    default_image_model = _f("default_image_model")
+    generation_temperature = _f("generation_temperature", "0.7")
+    cloud_api_base_url = _f("cloud_api_base_url")
+    cloud_api_key = _f("cloud_api_key")
+    cloud_text_model = _f("cloud_text_model")
+    gigachat_text_model = _f("gigachat_text_model")
+    gigachat_image_model = _f("gigachat_image_model")
+    gigachat_image_save_dir = _f("gigachat_image_save_dir")
+
     if ai_provider not in ("ollama", "cloud", "gigachat"):
         raise HTTPException(
             status_code=400,
@@ -744,16 +796,16 @@ def admin_settings_update(
 
     payload = {
         "ai_provider": ai_provider,
-        "ollama_base_url": ollama_base_url.strip(),
-        "default_text_model": default_text_model.strip(),
-        "default_image_model": default_image_model.strip(),
-        "generation_temperature": generation_temperature.strip() or "0.7",
-        "cloud_api_base_url": cloud_api_base_url.strip().rstrip("/"),
-        "cloud_api_key": cloud_api_key.strip(),
-        "cloud_text_model": cloud_text_model.strip(),
-        "gigachat_text_model": gigachat_text_model.strip(),
-        "gigachat_image_model": gigachat_image_model.strip(),
-        "gigachat_image_save_dir": gigachat_image_save_dir.strip() or "data/media",
+        "ollama_base_url": ollama_base_url,
+        "default_text_model": default_text_model,
+        "default_image_model": default_image_model,
+        "generation_temperature": generation_temperature or "0.7",
+        "cloud_api_base_url": cloud_api_base_url.rstrip("/"),
+        "cloud_api_key": cloud_api_key,
+        "cloud_text_model": cloud_text_model,
+        "gigachat_text_model": gigachat_text_model,
+        "gigachat_image_model": gigachat_image_model,
+        "gigachat_image_save_dir": gigachat_image_save_dir or "data/media",
         "image_provider": image_provider,
     }
     # Валидация температуры
@@ -801,6 +853,10 @@ def admin_settings_update(
         f"[admin] {admin.email}: обновил системные настройки AI "
         f"(текст: {payload['ai_provider']}, изображения: {payload['image_provider']})"
     )
+    # Ответ зависит от способа отправки: fetch (AJAX) получает JSON,
+    # обычная HTML-форма — редирект на страницу настроек.
+    if form.get("ajax") == "1":
+        return JSONResponse({"ok": True, "saved": sorted(payload.keys())})
     return RedirectResponse(url="/admin/settings", status_code=302)
 
 
