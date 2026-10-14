@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import settings
 from database import init_db, SessionLocal, engine, Base
-from models import PlatformAccount, ContentPlan, Post, PostStats
+from models import PlatformAccount, ContentPlan, Post, PostStats, TariffPlan
 
 # Настройка логирования
 logging.basicConfig(
@@ -52,6 +52,55 @@ def parse_args() -> argparse.Namespace:
     )
     
     return parser.parse_args()
+
+
+def create_default_tariff_plans(db):
+    """Создаёт базовые тарифные планы, если таблица tariff_plans пуста.
+
+    Планы настраиваются администратором; здесь только стартовые значения
+    для новой/пересозданной БД.
+    """
+    if db.query(TariffPlan).count() > 0:
+        logger.info("Тарифные планы уже существуют — пропускаю создание дефолтных")
+        return True
+
+    default_plans = [
+        TariffPlan(
+            name="Базовый",
+            cost=0.0,
+            max_plan_horizon_days=7,
+            max_rubrics=3,
+            max_posts_per_day=1,
+            max_posts_per_week=5,
+            max_posts_per_month=20,
+            max_communities=1,
+            allows_images=False,
+            max_images_per_post=1,
+            allowed_image_sources='[]',
+        ),
+        TariffPlan(
+            name="Про",
+            cost=1990.0,
+            max_plan_horizon_days=30,
+            max_rubrics=10,
+            max_posts_per_day=3,
+            max_posts_per_week=21,
+            max_posts_per_month=90,
+            max_communities=5,
+            allows_images=True,
+            max_images_per_post=8,
+            allowed_image_sources='["ai", "web_search", "user_upload"]',
+        ),
+    ]
+    try:
+        db.add_all(default_plans)
+        db.commit()
+        logger.info(f"Создано {len(default_plans)} дефолтных тарифных планов")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка при создании тарифных планов: {e}")
+        db.rollback()
+        return False
 
 
 def create_test_data(db: SessionLocal):
@@ -173,11 +222,23 @@ def main():
             Base.metadata.drop_all(bind=engine)
             logger.info("Все таблицы удалены")
         
-        # Инициализация БД (создание таблиц)
+        # Инициализация БД (создание таблиц + лёгкие миграции: новые таблицы
+        # tariff_plans / community_generation_contexts / post_images и колонка
+        # users.tariff_plan_id в существующих БД).
+        # NOTE: SQLAlchemy create_all не меняет существующие таблицы — если
+        # нужны гарантированно чистые таблицы, для тестов пересоздайте БД:
+        #   rm data/autopilot.db && python scripts/setup_db.py
         init_db()
         logger.info("Таблицы успешно созданы")
         print("\n✓ База данных успешно инициализирована")
         print(f"  Путь к файлу: {settings.db_path}")
+
+        # Стартовые тарифные планы (идемпотентно: только если таблица пуста)
+        db = SessionLocal()
+        try:
+            create_default_tariff_plans(db)
+        finally:
+            db.close()
         
         # Добавление тестовых данных
         if args.with_test_data:

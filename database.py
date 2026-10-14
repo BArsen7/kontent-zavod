@@ -158,6 +158,22 @@ def _migrate_posts_table(conn) -> None:
     _add_column_if_missing(conn, "posts", "vk_post_id", "INTEGER")
 
 
+def _migrate_tariff_and_images(conn) -> None:
+    """Миграция под новый функционал тарифов и множественных изображений.
+
+    SQLAlchemy create_all/create(checkfirst) НЕ добавляет колонки в уже
+    существующие таблицы, поэтому для старых БД вручную добавляем недостающую
+    колонку users.tariff_plan_id (nullable — тариф назначает админ).
+
+    Новые таблицы tariff_plans, community_generation_contexts и post_images
+    создаются автоматически на этапе поочерёдного создания таблиц (см. init_db).
+    Для полностью чистой схемы в тестовом окружении можно пересоздать БД:
+        rm data/autopilot.db && python scripts/setup_db.py
+    либо python scripts/setup_db.py --drop-existing (ОСТОРОЖНО: данные теряются).
+    """
+    _add_column_if_missing(conn, "users", "tariff_plan_id", "INTEGER")
+
+
 def init_db():
     """Инициализация базы данных: миграции и создание всех таблиц.
 
@@ -204,6 +220,9 @@ def init_db():
             # у существующих БД таблица posts создана до появления аналитики —
             # добавляем недостающую колонку vk_post_id.
             _migrate_posts_table(conn)
+            # Тарифы и множественные изображения: добавляем users.tariff_plan_id
+            # в старые БД (новые таблицы создаются выше по одной через create).
+            _migrate_tariff_and_images(conn)
     except Exception as e:  # noqa: BLE001 — миграция не должна ронять приложение
         print(f"[migration] Этап миграции блокировок пропущен: {type(e).__name__}: {e}")
 
