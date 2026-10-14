@@ -1,10 +1,14 @@
 import asyncio  # FIX: Event loop unblocked — вынос синхронных операций в поток
+import json
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import List, Dict, Any, Optional
 import datetime
+import os
 import threading
 import secrets
+import uuid
 
 import vk_api
 import bcrypt as _bcrypt
@@ -54,6 +58,24 @@ class PostImagesPayload(BaseModel):
     """Обновление списка изображений поста (PostImage)."""
 
     images: List[Dict[str, Any]] = []  # [{url|image_url, source|image_source}]
+
+
+class PostUpdatePayload(BaseModel):
+    """Частичное обновление поста (PUT /api/posts/{post_id}).
+
+    Все поля опциональны: обновляются только переданные. Поле images
+    заменяет связанный список PostImage целиком (порядок = order_index);
+    image_url/image_source сохраняются для обратной совместимости — при
+    передаче images первое изображение синхронизируется в post.image_url.
+    """
+
+    topic: Optional[str] = None
+    text_draft: Optional[str] = None
+    text_final: Optional[str] = None
+    status: Optional[str] = None
+    image_url: Optional[str] = None
+    image_source: Optional[str] = None
+    images: Optional[List[Dict[str, Any]]] = None
 
 
 from sqlalchemy.orm import Session
@@ -2335,3 +2357,381 @@ def get_period_posts(  # FIX: Event loop unblocked — синхронный ро
             for p in posts
         ]
     }
+
+
+# =============================================================================
+# Тарифные планы (Admin only): GET/POST /admin/tariffs, DELETE /admin/tariffs/{id}
+# =============================================================================
+
+def _serialize_tariff(plan: TariffPlan) -> Dict[str, Any]:
+    """Сериализует тарифный план для API-ответа."""
+    return {
+        "id": plan.id,
+        "name": plan.name,
+        "cost": plan.cost,
+        "max_plan_horizon_days": plan.max_plan_horizon_days,
+        "max_rubrics": plan.max_rubrics,
+        "max_posts_per_day": plan.max_posts_per_day,
+        "max_posts_per_week": plan.max_posts_per_week,
+        "max_posts_per_month": plan.max_posts_per_month,
+        "max_communities": plan.max_communities,
+        "allows_images": plan.allows_images,
+        "max_images_per_post": plan.max_images_per_post,
+        "allowed_image_sources": plan.allowed_image_sources,
+    }
+
+
+@app.get("/admin/tariffs")
+def admin_list_tariffs(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    request: Request,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(get_current_admin),
+) -> Dict[str, Any]:
+    """Список всех тарифных планов (только администратор)."""
+    plans = db.query(TariffPlan).order_by(TariffPlan.id.asc()).all()
+    return {"tariffs": [_serialize_tariff(p) for p in plans]}
+
+
+@app.post("/admin/tariffs")
+def admin_save_tariff(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    payload: TariffPlanPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(get_current_admin),
+) -> Dict[str, Any]:
+    """Создаёт или обновляет тарифный план (только администратор).
+
+    Если payload.id задан и план существует — обновление; иначе создание.
+    """
+    name = (payload.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Название тарифа обязательно")
+
+    plan = None
+    if payload.id is not None:
+        plan = db.query(TariffPlan).filter(TariffPlan.id == payload.id).first()
+        if plan is None:
+            raise HTTPException(status_code=404, detail="Тарифный план не найден")
+    else:
+        plan = TariffPlan(name=name)
+        db.add(plan)
+
+    plan.name = name
+    plan.cost = float(payload.cost or 0.0)
+    plan.max_plan_horizon_days = int(payload.max_plan_horizon_days)
+    plan.max_rubrics = int(payload.max_rubrics)
+    plan.max_posts_per_day = int(payload.max_posts_per_day)
+    plan.max_posts_per_week = int(payload.max_posts_per_week)
+    plan.max_posts_per_month = int(payload.max_posts_per_month)
+    plan.max_communities = int(payload.max_communities)
+    plan.allows_images = bool(payload.allows_images)
+    plan.max_images_per_post = int(payload.max_images_per_post)
+    plan.allowed_image_sources = payload.allowed_image_sources
+
+    db.commit()
+    db.refresh(plan)
+    logger.info(f"[admin/tariffs] Сохранён тариф id={plan.id} ({plan.name})")
+    return {"success": True, "tariff": _serialize_tariff(plan)}
+
+
+@app.delete("/admin/tariffs/{tariff_id}")
+def admin_delete_tariff(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    tariff_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _admin: User = Depends(get_current_admin),
+) -> Dict[str, Any]:
+    """Удаляет тарифный план (только администратор).
+
+    У пользователей, привязанных к удалённому плану, tariff_plan_id
+    сбрасывается в NULL (FK с ON DELETE SET NULL на уровне миграции может
+    отсутствовать в SQLite — делаем явно).
+    """
+    plan = db.query(TariffPlan).filter(TariffPlan.id == tariff_id).first()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Тарифный план не найден")
+
+    db.query(User).filter(User.tariff_plan_id == tariff_id).update(
+        {User.tariff_plan_id: None}, synchronize_session=False
+    )
+    db.delete(plan)
+    db.commit()
+    logger.info(f"[admin/tariffs] Удалён тариф id={tariff_id}")
+    return {"success": True, "deleted_tariff_id": tariff_id}
+
+
+# =============================================================================
+# Контекст генерации сообщества: GET/POST /api/community/{community_id}/context
+# =============================================================================
+
+def _get_owned_user_community(db: Session, user: User, community_id: int) -> UserCommunity:
+    """Возвращает UserCommunity по id, проверяя принадлежность пользователю.
+
+    community_id — это id записи в таблице user_communities (не VK group_id).
+    Администратору доступны чужие сообщества (для настройки из панели).
+    """
+    uc = db.query(UserCommunity).filter(UserCommunity.id == community_id).first()
+    if uc is None:
+        raise HTTPException(status_code=404, detail="Сообщество не найдено")
+    if uc.user_id != user.id and not getattr(user, "is_admin", False):
+        raise HTTPException(status_code=403, detail="Сообщество принадлежит другому пользователю")
+    return uc
+
+
+def _normalize_image_preferences(value: Any) -> Optional[str]:
+    """Приводит предпочтения источников картинок к JSON-строке.
+
+    Принимает список ('["ai", "web_search"]') либо готовую JSON-строку;
+    возвращает корректную JSON-строку списка строк.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            # Не JSON — считаем перечислением через запятую: "ai, web_search"
+            parsed = [s.strip() for s in raw.split(",") if s.strip()]
+        value = parsed
+    if isinstance(value, (list, tuple, set)):
+        allowed = {"ai", "web_search", "user_upload"}
+        items = [str(v).strip() for v in value if str(v).strip()]
+        unknown = [v for v in items if v not in allowed]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Недопустимые источники изображений: {unknown}. "
+                       f"Допустимы: {sorted(allowed)}",
+            )
+        return json.dumps(items, ensure_ascii=False)
+    raise HTTPException(status_code=400, detail="image_source_preferences должен быть списком или JSON-строкой")
+
+
+@app.get("/api/community/{community_id}/context")
+def get_community_context(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    community_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Возвращает настройки генерации сообщества (создаёт пустые, если нет)."""
+    user = require_auth(request, db)
+    uc = _get_owned_user_community(db, user, community_id)
+    ctx = get_or_create_generation_context(db, uc.id)
+    try:
+        prefs = json.loads(ctx.image_source_preferences) if ctx.image_source_preferences else []
+    except ValueError:
+        prefs = []
+    return {
+        "community_id": uc.id,
+        "goal": ctx.goal,
+        "community_specifics": ctx.community_specifics,
+        "target_audience": ctx.target_audience,
+        "current_state_and_what_works": ctx.current_state_and_what_works,
+        "image_source_preferences": prefs,
+        "is_configured": ctx.is_configured,
+        "updated_at": ctx.updated_at.isoformat() if ctx.updated_at else None,
+    }
+
+
+@app.post("/api/community/{community_id}/context")
+def save_community_context(
+    community_id: int,
+    payload: CommunityContextPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Сохраняет настройки генерации сообщества, устанавливая is_configured=True.
+
+    После сохранения контент-менеджер перестаёт задавать стартовые вопросы и
+    начинает внедрять контекст в промпт LLM как блок <CONTEXT>...</CONTEXT>.
+    """
+    user = require_auth(request, db)
+    uc = _get_owned_user_community(db, user, community_id)
+    ctx = get_or_create_generation_context(db, uc.id)
+
+    if payload.goal is not None:
+        ctx.goal = payload.goal.strip() or None
+    if payload.community_specifics is not None:
+        ctx.community_specifics = payload.community_specifics.strip() or None
+    if payload.target_audience is not None:
+        ctx.target_audience = payload.target_audience.strip() or None
+    if payload.current_state_and_what_works is not None:
+        ctx.current_state_and_what_works = payload.current_state_and_what_works.strip() or None
+    if payload.image_source_preferences is not None:
+        ctx.image_source_preferences = _normalize_image_preferences(
+            payload.image_source_preferences
+        )
+
+    # Настройки сохранены — диалог первичной настройки считается завершённым.
+    ctx.is_configured = True
+    db.commit()
+    db.refresh(ctx)
+    logger.info(f"[community/context] Сохранён контекст сообщества id={uc.id}")
+
+    try:
+        prefs = json.loads(ctx.image_source_preferences) if ctx.image_source_preferences else []
+    except ValueError:
+        prefs = []
+    return {
+        "success": True,
+        "community_id": uc.id,
+        "is_configured": ctx.is_configured,
+        "context": {
+            "goal": ctx.goal,
+            "community_specifics": ctx.community_specifics,
+            "target_audience": ctx.target_audience,
+            "current_state_and_what_works": ctx.current_state_and_what_works,
+            "image_source_preferences": prefs,
+        },
+    }
+
+
+# =============================================================================
+# Изображения: загрузка пользователем и поиск в интернете
+# =============================================================================
+
+_UPLOAD_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+_UPLOAD_MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 МБ
+
+
+@app.post("/api/upload-image")
+async def upload_image(
+    request: Request,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Загружает изображение пользователя в data/media/ (multipart/form-data).
+
+    Файл сохраняется под уникальным именем (uuid4 + исходное расширение),
+    возвращается веб-путь /media/{filename} — он раздаётся StaticFiles.
+    Источник для PostImage.image_source в этом случае — "user_upload".
+    """
+    require_auth(request, db)
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in _UPLOAD_ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Недопустимый тип файла '{ext or 'без расширения'}'. "
+                   f"Разрешены: {sorted(_UPLOAD_ALLOWED_EXTENSIONS)}",
+        )
+
+    content = await file.read()  # асинхронное чтение — event loop не блокируется
+    if not content:
+        raise HTTPException(status_code=400, detail="Пустой файл")
+    if len(content) > _UPLOAD_MAX_SIZE_BYTES:
+        raise HTTPException(status_code=413, detail="Файл слишком большой (макс. 10 МБ)")
+
+    media_dir = Path("data/media")
+    media_dir.mkdir(parents=True, exist_ok=True)
+    unique_name = f"{uuid.uuid4().hex}{ext}"
+    dest = media_dir / unique_name
+    # Запись на диск вынесена в поток — не блокируем event loop.
+    await asyncio.to_thread(dest.write_bytes, content)
+
+    url = f"/media/{unique_name}"
+    logger.info(f"[upload-image] Сохранён файл {unique_name} ({len(content)} байт)")
+    return {"url": url, "filename": unique_name, "size": len(content), "source": "user_upload"}
+
+
+@app.get("/api/search-images")
+async def search_images(
+    request: Request,
+    query: str = Query(..., min_length=1, description="Поисковый запрос"),
+    limit: int = Query(5, ge=1, le=30),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Ищет изображения в интернете (SerpApi, либо mock picsum.photos без ключа).
+
+    Вызов httpx.AsyncClient полностью асинхронный — event loop не блокируется.
+    Найденные URL можно передать в POST /api/posts/{id}/images с source="web_search".
+    """
+    require_auth(request, db)
+    urls = await search_images_web(query=query, limit=limit)
+    return {"query": query, "limit": limit, "results": urls, "count": len(urls)}
+
+
+# =============================================================================
+# Посты: присвоение изображений и обновление поста (мультикартинки)
+# =============================================================================
+
+@app.post("/api/posts/{post_id}/images")
+def set_post_images(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    post_id: int,
+    payload: PostImagesPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Заменяет список изображений поста (PostImage), упорядочивая по порядку.
+
+    Тело: {"images": [{"url": "...", "source": "ai|web_search|user_upload"}, ...]}
+    Первое изображение синхронизируется в post.image_url (обратная совместимость).
+    """
+    user = require_auth(request, db)
+
+    post = db.query(Post).filter(Post.id == post_id).first()
+    if post is None:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+
+    _set_post_images(db, post, payload.images)
+
+    # Обратная совместимость: image_url = первая картинка списка.
+    if post.images:
+        first = post.images[0]
+        post.image_url = first.image_url
+        if first.image_source:
+            post.image_source = first.image_source
+    elif payload.images == []:
+        post.image_url = None
+        post.image_source = None
+
+    db.commit()
+    db.refresh(post)
+    logger.info(
+        f"[posts/images] Пост id={post_id}: установлено изображений: {len(post.images)} "
+        f"(пользователь id={user.id})"
+    )
+    return {"success": True, "post_id": post_id, "images": _serialize_post(post)["images"]}
+
+
+@app.put("/api/posts/{post_id}")
+def update_post(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    post_id: int,
+    payload: PostUpdatePayload,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Обновляет пост (текст/статус/изображения). Поле images заменяет PostImage-связи.
+
+    При создании поста изображения назначаются отдельно через
+    POST /api/posts/{id}/images (генерация создаёт посты без картинок).
+    """
+    require_auth(request, db)
+
+    post = db.query(Post).filter(Post.id == post_id).first()
+    if post is None:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    if post.status == "published":
+        raise HTTPException(status_code=400, detail="Нельзя редактировать опубликованный пост")
+
+    data = payload.model_dump(exclude_unset=True)
+    images_payload = data.pop("images", None)
+
+    for field, value in data.items():
+        setattr(post, field, value)
+
+    if images_payload is not None:
+        _set_post_images(db, post, images_payload)
+        # Синхронизация обратной совместимости: image_url первой картинки.
+        if post.images:
+            post.image_url = post.images[0].image_url
+        elif images_payload == []:
+            post.image_url = None
+
+    db.commit()
+    db.refresh(post)
+    logger.info(f"[posts/update] Обновлён пост id={post_id}")
+    return {"success": True, "post": _serialize_post(post)}
