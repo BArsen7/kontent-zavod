@@ -1241,12 +1241,30 @@ def get_posts(
         .limit(limit)
         .all()
     )
-    
-    # FIX (мультикартинки): сериализация через _serialize_post — возвращаем
-    # также вложенный список images (PostImage, упорядочен по order_index).
-    # Примечание: это синхронный роут — FastAPI выполняет его целиком в
-    # threadpool, поэтому lazy load связей не блокирует event loop.
-    return [_serialize_post(post) for post in posts]
+    # FIX (UI): если у пользователя несколько сообществ, добавляем к каждому
+    # посту user_community_id (через период: community_info хранит id
+    # UserCommunity в формате "Сообщество ID: {id}") — фронтенд использует его,
+    # чтобы ограничить выбор картинок тарифом именно этого сообщества.
+    user_community_map: Dict[int, int] = {}
+    if len(db.query(UserCommunity.id).filter(UserCommunity.user_id == current_user.id).all()) > 1:
+        for p in posts:
+            pid = p.content_plan_period_id
+            if pid is None or pid in user_community_map:
+                continue
+            period = db.query(ContentPlanPeriod).filter(ContentPlanPeriod.id == pid).first()
+            info = (period.community_info or "") if period else ""
+            marker = "Сообщество ID:"
+            if marker in info:
+                try:
+                    user_community_map[pid] = int(
+                        info.split(marker, 1)[1].strip().split()[0].strip(",.")
+                    )
+                except (ValueError, IndexError):
+                    pass
+    serialized = [_serialize_post(post) for post in posts]
+    for item, post in zip(serialized, posts):
+        item["user_community_id"] = user_community_map.get(post.content_plan_period_id)
+    return serialized
 
 
 def _serialize_post(post: Post) -> Dict[str, Any]:
@@ -2475,6 +2493,50 @@ def admin_delete_tariff(  # FIX: Event loop unblocked — синхронный �
     db.commit()
     logger.info(f"[admin/tariffs] Удалён тариф id={tariff_id}")
     return {"success": True, "deleted_tariff_id": tariff_id}
+
+
+# =============================================================================
+# Тариф пользователя: GET /api/tariff-info (лимиты для фронтенда)
+# =============================================================================
+
+@app.get("/api/tariff-info")
+def get_tariff_info(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Возвращает тарифный план текущего пользователя и его лимиты.
+
+    Используется фронтендом для ограничения количества картинок в посте
+    (max_images_per_post) и списка разрешённых источников
+    (allowed_image_sources). Если тариф не назначен — возвращаются
+    безопасные дефолты (картинки запрещены).
+    """
+    user = require_auth(request, db)
+    plan = db.query(TariffPlan).filter(TariffPlan.id == user.tariff_plan_id).first() \
+        if user.tariff_plan_id else None
+    if plan is None:
+        return {
+            "has_tariff": False,
+            "tariff": None,
+            "limits": {
+                "allows_images": False,
+                "max_images_per_post": 0,
+                "allowed_image_sources": [],
+            },
+        }
+    try:
+        sources = json.loads(plan.allowed_image_sources) if plan.allowed_image_sources else []
+    except ValueError:
+        sources = []
+    return {
+        "has_tariff": True,
+        "tariff": _serialize_tariff(plan),
+        "limits": {
+            "allows_images": plan.allows_images,
+            "max_images_per_post": plan.max_images_per_post or 0,
+            "allowed_image_sources": sources,
+        },
+    }
 
 
 # =============================================================================
