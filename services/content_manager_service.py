@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
@@ -47,6 +48,10 @@ CONTENT_MANAGER_SYSTEM_PROMPT = """Ты — персональный конте�
 4. Предложить посты разных типов: полезные, вовлекающие, развлекательные, продающие
 
 Тон общения: дружеский, профессиональный, поддерживающий. Задавай вопросы по одному, не перегружай пользователя.
+
+Форматирование ответов (ВАЖНО):
+- Отвечай обычным текстом: для переносов строк используй \\n, для списков — «- » с новой строки.
+- КАТЕГОРИЧЕСКИ запрещён любой HTML: не используй <br>, <b>, <i>, <ul>, <li> и другие теги.
 
 Формат контент-плана:
 - Период: неделя, 2 недели, месяц
@@ -195,6 +200,31 @@ def get_user_community_info(db: Session, user_id: int) -> str:
     return "\n".join(info_parts)
 
 
+_HTML_TAG_RE = re.compile(r"<br\s*/?>|</?(?:p|div|span|ul|ol|li|b|strong|i|em|u|s|a|h[1-6]|blockquote|pre|code)\b[^>]*>", re.IGNORECASE)
+
+
+def _strip_html_from_response(text: str) -> str:
+    """Нормализует ответ LLM в plain text для отображения в чате.
+
+    FIX (баг с <br>): контент-менеджер рендерится во фронтенде как escaped
+    plain text (переводы \n заменяются на <br> уже на клиенте). Если модель
+    возвращает HTML (<br>, <b>, <ul><li> и т.п.), пользователь видит теги
+    текстом. Удаляем типовые HTML-теги, приводя ответ к обычному тексту.
+
+    Args:
+        text: Сырой ответ модели.
+
+    Returns:
+        Текст без HTML-разметки (без изменений, если тегов нет).
+    """
+    if not text or "<" not in text:
+        return text
+    cleaned = _HTML_TAG_RE.sub("\n", text)
+    # Схлопываем несколько подряд идущих пустых строк в одну.
+    cleaned = re.sub(r"(\n\s*){2,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
 def generate_ai_response(
     db: Session,
     period_id: int,
@@ -248,6 +278,12 @@ def generate_ai_response(
             system_prompt=CONTENT_MANAGER_SYSTEM_PROMPT,
             use_local=_default_use_local(db),
         )
+
+        # FIX (баг с <br> в чате): модель иногда возвращает HTML-разметку
+        # (<br>, <b>, списки <ul><li>) вместо обычного текста. Фронтенд экранирует
+        # '<' при выводе, поэтому теги видны пользователю как текст (например,
+        # «...темы:<br>- Рецепты<br>- Мастер-классы»). Нормализуем ответ в plain text.
+        response = _strip_html_from_response(response)
         
         # Сохраняем сообщение пользователя и ответ ИИ
         add_chat_message(db, period_id, "user", user_message)

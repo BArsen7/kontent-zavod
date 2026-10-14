@@ -366,7 +366,7 @@
                     const chatContainer = document.getElementById('chatMessages');
                     chatContainer.innerHTML = `
                         <div class="chat-message assistant">
-                            ${result.welcome_message.replace(/\n/g, '<br>')}
+                            ${nl2br(result.welcome_message)}
                         </div>
                     `;
                 } else {
@@ -392,6 +392,14 @@
             }
         }
 
+        // FIX (баг с видимыми <br> в чате): сообщения модели вставляются через
+        // innerHTML; используем единый escapeHtml (объявлен выше) и переводим
+        // переводы строк в <br> ПОСЛЕ экранирования — так любые теги из ответа
+        // LLM не интерпретируются как разметка и не показываются текстом.
+        function nl2br(text) {
+            return escapeHtml(text).replace(/\n/g, '<br>');
+        }
+
         function renderChatMessages(messages) {
             const container = document.getElementById('chatMessages');
             
@@ -408,7 +416,7 @@
             container.innerHTML = messages.map(m => `
                 <div class="chat-message ${m.role}">
                     <div class="text-xs opacity-75 mb-1">${m.role === 'user' ? 'Вы' : 'Контент-менеджер'}</div>
-                    <div>${m.content.replace(/\n/g, '<br>')}</div>
+                    <div>${nl2br(m.content)}</div>
                 </div>
             `).join('');
             
@@ -437,7 +445,7 @@
             const userMsgHtml = `
                 <div class="chat-message user">
                     <div class="text-xs opacity-75 mb-1">Вы</div>
-                    <div>${message.replace(/</g, '&lt;')}</div>
+                    <div>${escapeHtml(message)}</div>
                 </div>
             `;
             chatContainer.insertAdjacentHTML('beforeend', userMsgHtml);
@@ -457,7 +465,7 @@
                     const aiMsgHtml = `
                         <div class="chat-message assistant">
                             <div class="text-xs opacity-75 mb-1">Контент-менеджер</div>
-                            <div>${result.ai_response.replace(/\n/g, '<br>').replace(/</g, '&lt;')}</div>
+                            <div>${nl2br(result.ai_response)}</div>
                         </div>
                     `;
                     chatContainer.insertAdjacentHTML('beforeend', aiMsgHtml);
