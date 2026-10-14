@@ -12,6 +12,7 @@ from models import (
     MarketingStrategy,
     Post,
     SystemSetting,
+    PostImage,
 )
 from generators.text_generator import generate_text
 from generators.image_generator import generate_image
@@ -257,6 +258,25 @@ def _format_rubrics(rubrics: Any) -> str:
     return "; ".join(rendered)
 
 
+def _tariff_allows_images(db: Session, user_id: Optional[int]) -> bool:
+    """Разрешает ли тариф пользователя генерацию автокартинок.
+
+    True, если у пользователя нет тарифа (обратная совместимость: демо/админ
+    работают как раньше) либо тариф задан и allows_images == True.
+    """
+    if user_id is None:
+        return True
+    from models import User
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None or not user.tariff_plan_id:
+        return True  # тариф не назначен — не блокируем старое поведение
+    from services.tariff_service import get_user_tariff
+    plan = get_user_tariff(db, user)
+    if plan is None:
+        return True
+    return bool(plan.allows_images)
+
+
 def generate_weekly_pack(
     niche: str = "3d_cookies",
     db: Session = None,
@@ -399,14 +419,19 @@ def generate_weekly_pack(
             logger.info("Генерация изображения...")
             image_prompt = f"Cozy baking scene, homemade cookies with detailed relief pattern, {post_type} theme, warm lighting, photorealistic, 4k"
             
-            try:
-                # Провайдер выбирается автоматически (SystemSetting image_provider):
-                # GigaChat Premium (нативная генерация) или Kandinsky
-                image_path = generate_image(prompt=image_prompt, save_dir="data/media")
-                logger.info(f"Изображение сохранено: {image_path}")
-            except Exception as img_err:
-                logger.error(f"Ошибка генерации изображения: {img_err}. Продолжаем без картинки.")
-                image_path = None
+            # FIX (тарификация): автокартинка генерируется только если тариф
+            # пользователя разрешает изображения (allows_images). Без тарифа —
+            # старое поведение (генерируем), чтобы не ломать демо/админ-режим.
+            image_path = None
+            if _tariff_allows_images(db, user_id):
+                try:
+                    # Провайдер выбирается автоматически (SystemSetting image_provider):
+                    # GigaChat Premium (нативная генерация) или Kandinsky
+                    image_path = generate_image(prompt=image_prompt, save_dir="data/media")
+                    logger.info(f"Изображение сохранено: {image_path}")
+                except Exception as img_err:
+                    logger.error(f"Ошибка генерации изображения: {img_err}. Продолжаем без картинки.")
+                    image_path = None
             
             # Создаём запись в БД
             new_post = Post(
@@ -426,7 +451,21 @@ def generate_weekly_pack(
             db.add(new_post)
             db.commit()
             db.refresh(new_post)
-            
+
+            # FIX (тарификация): переносим автокартинку в PostImage — единый
+            # механизм изображений поста (галерея UI читает массив images).
+            if new_post.image_url:
+                db.add(
+                    PostImage(
+                        post_id=new_post.id,
+                        image_url=new_post.image_url,
+                        image_source=new_post.image_source or "ai",
+                        order_index=0,
+                    )
+                )
+                db.commit()
+                db.refresh(new_post)
+
             logger.info(f"Пост ID {new_post.id} успешно создан и сохранён в БД")
             
             created_posts.append({

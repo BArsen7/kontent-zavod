@@ -109,6 +109,11 @@ from services.content_manager_service import (
     check_and_regenerate_expiring_plan,
 )
 from services.image_search_service import search_images_web
+from services.tariff_service import (
+    check_tariff_generation_limits,
+    assign_images_to_post as _assign_images_to_post,
+    get_user_tariff as _get_user_tariff,
+)
 from managers.community_manager import CommunityManager
 from vk_errors import create_vk_session, describe_api_error, positive_group_id
 from services.scheduler import start_scheduler
@@ -1399,6 +1404,12 @@ def generate_pack(  # FIX: Event loop unblocked — синхронный роу�
         f"пользователем id={current_user.id}"
     )
 
+    # FIX (тарификация): проверка лимитов тарифа ДО запуска генерации:
+    # дальность периода (max_plan_horizon_days) и количество постов за
+    # текущий период (max_posts_per_week / max_posts_per_month с учётом
+    # уже созданных постов). 403 — если лимит превышен.
+    tariff_check = check_tariff_generation_limits(db, current_user, period_type, expected_count)
+
     _pack_task_cleanup()
     task_id = secrets.token_hex(8)
     with _PACK_TASKS_LOCK:
@@ -1466,7 +1477,8 @@ def generate_pack(  # FIX: Event loop unblocked — синхронный роу�
         "task_id": task_id,
         "message": "Генерация запущена в фоновом режиме",
         "period_type": period_type,
-        "count": expected_count
+        "count": expected_count,
+        "tariff": tariff_check,  # диагностика применённых лимитов тарифа
     }
 
 
@@ -2183,15 +2195,28 @@ async def generate_plan_from_chat(
 ) -> Dict[str, Any]:
     """Генерирует контент-план на основе диалога в чате."""
     user = require_auth(request, db)
-    
+
+    period = db.query(ContentPlanPeriod).filter(
+        ContentPlanPeriod.id == period_id,
+        ContentPlanPeriod.user_id == user.id
+    ).first()
+    if not period:
+        raise HTTPException(status_code=404, detail="Период контент-плана не найден")
+
+    # FIX (тарификация): проверка лимитов тарифа ДО обращения к LLM:
+    # дальность периода (max_plan_horizon_days) и количество постов за
+    # текущий период (max_posts_per_week/month с учётом уже созданных).
+    tariff_check = check_tariff_generation_limits(db, user, period.period_type)
+
     # FIX: Event loop unblocked — синхронная генерация через ИИ (requests.post внутри)
     # вынесена в поток через asyncio.to_thread, event loop не блокируется.
     posts = await asyncio.to_thread(generate_content_plan_from_chat, db, period_id, user.id)
-    
+
     return {
         "success": True,
         "message": f"Создано {len(posts)} постов",
-        "posts": posts
+        "posts": posts,
+        "tariff": tariff_check,  # диагностика применённых лимитов тарифа
     }
 
 
@@ -2814,3 +2839,41 @@ def update_post(  # FIX: Event loop unblocked — синхронный роут 
     db.refresh(post)
     logger.info(f"[posts/update] Обновлён пост id={post_id}")
     return {"success": True, "post": _serialize_post(post)}
+
+
+@app.post("/api/posts/{post_id}/assign-images")
+async def assign_post_images(
+    post_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Гибридно назначает посту изображения согласно политике его тарифа.
+
+    Логика (services.tariff_service.assign_images_to_post):
+      а) allows_images == False (или тарифа нет) — пост остаётся без картинок;
+      б) целевое количество — до max_images_per_post;
+      в) обход источников в приоритете: user_upload (уже загруженные пользователем
+         картинки идут первыми) -> ai (генерация) -> web_search (поиск);
+      г) результат сохраняется в PostImage с корректным order_index.
+
+    Синхронная работа с БД и сетевые вызовы генерации/поиска вынесены в поток
+    через asyncio.to_thread — event loop не блокируется.
+    """
+    user = require_auth(request, db)
+
+    post = db.query(Post).filter(Post.id == post_id).first()
+    if post is None:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    if post.status == "published":
+        raise HTTPException(status_code=400, detail="Нельзя редактировать опубликованный пост")
+
+    plan = _get_user_tariff(db, user)
+    assigned = await asyncio.to_thread(
+        _assign_images_to_post, db, post, plan, post.topic
+    )
+    return {
+        "success": True,
+        "post_id": post_id,
+        "tariff": getattr(plan, "name", None),
+        "images": assigned,
+    }

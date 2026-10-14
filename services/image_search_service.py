@@ -101,3 +101,25 @@ async def search_images_web(query: str, limit: int = 5) -> List[str]:
         logger.info("SerpApi не вернул результатов — fallback на mock")
         return _mock_image_urls(query, limit)
     return urls
+
+
+def search_images_sync(query: str, limit: int = 5) -> List[str]:
+    """Синхронная обёртка поиска изображений для фоновых потоков генерации.
+
+    Предназначена для вызова ИЗ ОТДЕЛЬНОГО ПОТОКА (threadpool-роут FastAPI
+    или threading.Thread фоновой генерации) — здесь можно безопасно крутить
+    свой event loop. НИКОГДА не вызывать напрямую из async-контекста
+    (используйте ``await search_images_web(...)``).
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(search_images_web(query, limit))
+    # Мы внутри работающего event loop — создаём отдельный поток с новым loop,
+    # чтобы не словать "asyncio.run() cannot be called from a running event loop".
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, search_images_web(query, limit)).result()
