@@ -24,12 +24,17 @@ class User(Base):
     is_blocked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     blocked_reason: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     blocked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Тарифный план пользователя (назначается администратором панели)
+    tariff_plan_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("tariff_plans.id"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     communities: Mapped[list["UserCommunity"]] = relationship(
         "UserCommunity", back_populates="user", cascade="all, delete-orphan"
     )
+    tariff_plan: Mapped[Optional["TariffPlan"]] = relationship("TariffPlan")
 
 
 class Session(Base):
@@ -137,6 +142,12 @@ class Post(Base):
     )
     stats: Mapped[list["PostStats"]] = relationship(
         "PostStats", back_populates="post", cascade="all, delete-orphan"
+    )
+    # Множественные изображения поста (упорядочены по order_index).
+    # Поле image_url оставлено для обратной совместимости со старой схемой.
+    images: Mapped[list["PostImage"]] = relationship(
+        "PostImage", back_populates="post", cascade="all, delete-orphan",
+        order_by="PostImage.order_index",
     )
 
 
@@ -284,3 +295,77 @@ class MarketingStrategy(Base):
     generated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )
+
+
+class TariffPlan(Base):
+    """Тарифный план (настраивается администратором панели).
+
+    Задаёт лимиты функционала для пользователя: дальность контент-плана,
+    количество рубрик и постов, сообществ, а также политику изображений.
+    allowed_image_sources хранится как JSON-строка списка источников,
+    например: '["ai", "web_search", "user_upload"]'.
+    """
+
+    __tablename__ = "tariff_plans"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)  # "Базовый", "Про"
+    cost: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    max_plan_horizon_days: Mapped[int] = mapped_column(Integer, default=7, nullable=False)
+    max_rubrics: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    max_posts_per_day: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    max_posts_per_week: Mapped[int] = mapped_column(Integer, default=7, nullable=False)
+    max_posts_per_month: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
+    max_communities: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    allows_images: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    max_images_per_post: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    allowed_image_sources: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class CommunityGenerationContext(Base):
+    """Настройки генерации и контекста конкретного сообщества пользователя.
+
+    Заполняется в первом диалоге с контент-менеджером: цель, специфика
+    сообщества, ЦА, что уже есть и что работает. image_source_preferences
+    — JSON-строка приоритетных источников картинок, например:
+    '["ai", "web_search"]'. is_configured становится True после первого
+    завершённого диалога настройки.
+    """
+
+    __tablename__ = "community_generation_contexts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_community_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("user_communities.id"), nullable=False, index=True
+    )
+    goal: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    community_specifics: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    target_audience: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    current_state_and_what_works: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    image_source_preferences: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_configured: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+    user_community: Mapped["UserCommunity"] = relationship("UserCommunity")
+
+
+class PostImage(Base):
+    """Изображение поста (поддержка нескольких картинок в одном посте).
+
+    Упорядочивается по order_index; image_source — источник картинки:
+    "ai", "web_search" или "user_upload".
+    """
+
+    __tablename__ = "post_images"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    post_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("posts.id"), nullable=False, index=True
+    )
+    image_url: Mapped[str] = mapped_column(String(500), nullable=False)
+    image_source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    order_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    post: Mapped["Post"] = relationship("Post", back_populates="images")
