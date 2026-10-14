@@ -776,6 +776,23 @@ def build_ai_config(db: Session) -> Dict[str, Any]:
     }
 
 
+@app.get("/admin/tariffs-page")
+def admin_tariffs_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+):
+    """Рендерит страницу управления тарифными планами (только администратор).
+
+    Данные тарифов загружаются фронтендом через JSON-API GET /admin/tariffs.
+    """
+    return templates.TemplateResponse(
+        request=request,
+        name="admin_tariffs.html",
+        context={"user": admin, "admin": admin},
+    )
+
+
 @app.get("/admin/settings")
 def admin_settings_page(
     request: Request,

@@ -38,6 +38,17 @@
             display: flex;
             flex-direction: column;
         }
+        /* FIX (UI): утилитарные классы, используемые в новой разметке (модалка
+           контекста, превью постов), но отсутствующие в локальном styles.css. */
+        .max-w-xl { max-width: 36rem; }
+        .max-h-\[90vh\] { max-height: 90vh; }
+        .leading-none { line-height: 1; }
+        .w-full { width: 100%; }
+        /* Клик по карточке поста в превью — открывает модалку полного просмотра */
+        .post-preview-card { cursor: pointer; }
+        .whitespace-pre-wrap { white-space: pre-wrap; }
+        #previewGallery img { width: 100%; height: 8rem; object-fit: cover; border-radius: .375rem; border: 1px solid #d1d5db; cursor: zoom-in; }
+        .post-preview-card img { cursor: default; }
         /* FIX (UI): тост был статично невидим (opacity-0 + translate-y-20 в разметке),
            а JS-классы для его показа в локальном styles.css отсутствовали — уведомления
            вообще не появлялись. Теперь показ/скрытие управляются классом .toast-show. */
@@ -71,7 +82,17 @@
                 <div class="bg-white rounded-lg shadow p-6">
                     <h2 class="text-xl font-semibold text-gray-800 mb-4">Создать новый план</h2>
                     <p class="text-sm text-gray-600 mb-4">Выберите период планирования:</p>
-                    
+
+                    <!-- FIX (контекст): выбор сообщества для настройки генерации -->
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-700 mb-1">Сообщество (для настроек генерации)</label>
+                        <select id="contextCommunitySelect" onchange="onContextCommunityChange()"
+                                class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <option value="">Загрузка сообществ...</option>
+                        </select>
+                        <div id="contextStatusLine" class="text-xs mt-2 text-gray-500"></div>
+                    </div>
+
                     <div class="space-y-3">
                         <button onclick="createPeriod('week')" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-lg transition duration-200">
                             📅 Неделя (7 постов)
@@ -110,8 +131,16 @@
                 <div class="bg-white rounded-lg shadow h-[600px] flex flex-col">
                     <!-- Chat Header -->
                     <div class="px-6 py-4 border-b border-gray-200">
-                        <h2 class="text-xl font-semibold text-gray-800">Чат с контент-менеджером</h2>
-                        <p id="currentPeriodInfo" class="text-sm text-gray-500 mt-1">Выберите или создайте период для начала работы</p>
+                        <div class="flex justify-between items-start">
+                            <div>
+                                <h2 class="text-xl font-semibold text-gray-800">Чат с контент-менеджером</h2>
+                                <p id="currentPeriodInfo" class="text-sm text-gray-500 mt-1">Выберите или создайте период для начала работы</p>
+                            </div>
+                            <!-- FIX (контекст): кнопка редактирования сохранённых настроек генерации -->
+                            <button id="editContextBtn" onclick="openContextModal()" class="hidden bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-medium py-1 px-3 rounded-md border border-gray-300 transition duration-200 whitespace-nowrap flex-shrink-0 ml-2">
+                                ⚙️ Редактировать настройки
+                            </button>
+                        </div>
                     </div>
 
                     <!-- Chat Messages Area -->
@@ -154,6 +183,96 @@
         </div>
     </div>
 
+    <!-- FIX (UI): Модалка полного превью поста (клик по карточке в «Предпросмотр плана»).
+         Полный текст (text_final || text_draft), ВСЕ изображения массива images галереей,
+         дата публикации и статус. -->
+    <div id="postPreviewModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-lg max-w-xl w-full mx-4 max-h-[90vh] overflow-y-auto shadow-lg">
+            <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                <h3 class="text-lg font-semibold text-gray-800" id="previewTitle">Пост</h3>
+                <button onclick="hidePostPreview()" class="px-2 py-1 text-gray-500 hover:bg-gray-100 rounded-md text-xl leading-none" title="Закрыть">&times;</button>
+            </div>
+            <div class="p-6">
+                <div class="flex flex-wrap gap-2 items-center mb-4">
+                    <span id="previewStatus"></span>
+                    <span id="previewType"></span>
+                    <span class="text-xs text-gray-500" id="previewDates"></span>
+                </div>
+                <div id="previewText" class="text-sm text-gray-700 mb-4 whitespace-pre-wrap"></div>
+                <div class="text-sm font-medium text-gray-600 mb-2">Изображения (<span id="previewImgCount">0</span>):</div>
+                <div id="previewGallery" class="grid grid-cols-2 md:grid-cols-3 gap-2"></div>
+            </div>
+            <div class="px-6 py-4 border-t border-gray-200 flex justify-end">
+                <button onclick="hidePostPreview()" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-md">Закрыть</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- FIX (контекст): Модальная форма настроек генерации сообщества.
+         Открывается автоматически, если is_configured == false (при выборе/создании
+         периода), и по кнопке «Редактировать настройки». Сохраняет через
+         POST /api/community/{id}/context (устанавливает is_configured=True). -->
+    <div id="contextModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-lg max-w-xl w-full mx-4 max-h-[90vh] overflow-y-auto shadow-lg">
+            <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                <h3 class="text-lg font-semibold text-gray-800">⚙️ Настройки генерации контента</h3>
+                <button onclick="hideContextModal()" class="px-2 py-1 text-gray-500 hover:bg-gray-100 rounded-md text-xl leading-none" title="Закрыть">&times;</button>
+            </div>
+            <div class="p-6">
+                <p class="text-sm text-gray-600 mb-4">
+                    Ответьте на 5 вопросов — эти данные будут внедряться в промпт ИИ как
+                    <code>&lt;CONTEXT&gt;</code> для вашего сообщества:
+                    <span id="contextModalCommunityName" class="font-medium text-gray-800"></span>
+                </p>
+
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">1) Цель сообщества</label>
+                        <textarea id="ctx-goal" rows="2" placeholder="Например: привлекать новых клиентов на услуги ремонта"
+                                  class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">2) Специфика сообщества</label>
+                        <textarea id="ctx-specifics" rows="2" placeholder="Чем вы отличаетесь, tone of voice, форматы..."
+                                  class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">3) Целевая аудитория</label>
+                        <textarea id="ctx-audience" rows="2" placeholder="Возраст, интересы, боли аудитории..."
+                                  class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">4) Что уже есть и что работает</label>
+                        <textarea id="ctx-works" rows="2" placeholder="Рубрики/посты с лучшими охватами, проверенные темы..."
+                                  class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">5) Предпочтения по картинкам</label>
+                        <div class="flex flex-wrap gap-4">
+                            <label class="inline-flex items-center text-sm text-gray-700">
+                                <input type="checkbox" class="ctx-source mr-2" value="ai"> 🤖 Генерация ИИ
+                            </label>
+                            <label class="inline-flex items-center text-sm text-gray-700">
+                                <input type="checkbox" class="ctx-source mr-2" value="web_search"> 🔎 Веб-поиск
+                            </label>
+                            <label class="inline-flex items-center text-sm text-gray-700">
+                                <input type="checkbox" class="ctx-source mr-2" value="user_upload"> 📤 Своя загрузка
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="flex justify-end space-x-2 mt-6">
+                    <button onclick="hideContextModal()" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-md">Позже</button>
+                    <button onclick="saveContext()" id="ctx-save-btn"
+                            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-semibold disabled:opacity-50">
+                        💾 Сохранить настройки
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Notification -->
     <div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition duration-300 z-50">
         <span id="toastMessage">Notification</span>
@@ -165,6 +284,168 @@
         // State
         let currentPeriodId = null;
         let periods = [];
+        // FIX (превью): кэш постов периода для модалки полного просмотра
+        let lastPeriodPosts = [];
+        // FIX (контекст): сообщества пользователя и кэш is_configured по id
+        let userCommunities = [];
+        const contextConfiguredCache = {};
+
+        // =====================================================================
+        // FIX (контекст): настройки генерации сообщества (Goal/ЦА/Специфика/
+        // Что работает + источники картинок). GET/POST /api/community/{id}/context
+        // =====================================================================
+        async function fetchUserCommunities() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/user/communities`);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    return data.communities || [];
+                }
+            } catch (e) {
+                console.error('Ошибка загрузки сообществ:', e);
+            }
+            return [];
+        }
+
+        function renderCommunitySelect() {
+            const sel = document.getElementById('contextCommunitySelect');
+            if (!sel) return;
+            const prev = sel.value;
+            sel.innerHTML = '<option value="">Без сообщества</option>' +
+                userCommunities.map(c => `<option value="${c.id}">${escapeHtml(c.group_name)} (${c.group_id})</option>`).join('');
+            if (prev && userCommunities.some(c => String(c.id) === prev)) sel.value = prev;
+            updateContextStatusLine();
+        }
+
+        function selectedCommunityId() {
+            const v = document.getElementById('contextCommunitySelect')?.value;
+            return v ? parseInt(v, 10) : null;
+        }
+
+        function onContextCommunityChange() {
+            updateContextStatusLine();
+            const cid = selectedCommunityId();
+            // При выборе ненастроенного сообщества сразу показываем форму настроек
+            if (cid && contextConfiguredCache[cid] === false) openContextModal();
+        }
+
+        function updateContextStatusLine() {
+            const line = document.getElementById('contextStatusLine');
+            const btn = document.getElementById('editContextBtn');
+            const cid = selectedCommunityId();
+            if (!line) return;
+            if (!cid) {
+                line.innerHTML = '<span class="text-gray-400">Сообщество не выбрано</span>';
+                if (btn) btn.classList.add('hidden');
+                return;
+            }
+            const configured = contextConfiguredCache[cid];
+            if (configured === undefined) {
+                line.textContent = 'Проверка настроек...';
+            } else if (configured) {
+                line.innerHTML = '<span class="text-green-600">✅ Настройки генерации сохранены</span>';
+            } else {
+                line.innerHTML = '<span class="text-yellow-600">⚠️ Контекст не настроен — заполните форму</span>';
+            }
+            if (btn) btn.classList.toggle('hidden', !configured);
+        }
+
+        async function loadContextState(communityId) {
+            if (!communityId) return;
+            try {
+                const resp = await fetch(`${API_BASE}/api/community/${communityId}/context`);
+                if (resp.ok) {
+                    const data = await resp.json();
+                    contextConfiguredCache[communityId] = !!data.is_configured;
+                    fillContextForm(data);
+                }
+            } catch (e) {
+                console.error('Ошибка загрузки контекста:', e);
+            }
+            updateContextStatusLine();
+        }
+
+        function fillContextForm(data) {
+            document.getElementById('ctx-goal').value = data.goal || '';
+            document.getElementById('ctx-specifics').value = data.community_specifics || '';
+            document.getElementById('ctx-audience').value = data.target_audience || '';
+            document.getElementById('ctx-works').value = data.current_state_and_what_works || '';
+            const prefs = Array.isArray(data.image_source_preferences) ? data.image_source_preferences : [];
+            document.querySelectorAll('.ctx-source').forEach(cb => { cb.checked = prefs.includes(cb.value); });
+        }
+
+        function openContextModal() {
+            const cid = selectedCommunityId();
+            if (!cid) {
+                showToast('Сначала выберите сообщество', true);
+                return;
+            }
+            const comm = userCommunities.find(c => c.id === cid);
+            document.getElementById('contextModalCommunityName').textContent =
+                comm ? `«${comm.group_name}»` : '';
+            loadContextState(cid).then(() => {
+                const modal = document.getElementById('contextModal');
+                // Порядок важен: сначала убрать hidden, затем добавить flex.
+                modal.classList.remove('hidden');
+                modal.classList.add('flex');
+            });
+        }
+
+        function hideContextModal() {
+            const modal = document.getElementById('contextModal');
+            modal.classList.remove('flex');
+            modal.classList.add('hidden');
+        }
+
+        async function saveContext() {
+            const cid = selectedCommunityId();
+            if (!cid) { showToast('Сообщество не выбрано', true); return; }
+
+            const payload = {
+                goal: document.getElementById('ctx-goal').value.trim(),
+                community_specifics: document.getElementById('ctx-specifics').value.trim(),
+                target_audience: document.getElementById('ctx-audience').value.trim(),
+                current_state_and_what_works: document.getElementById('ctx-works').value.trim(),
+                image_source_preferences: [...document.querySelectorAll('.ctx-source:checked')].map(cb => cb.value),
+            };
+
+            const btn = document.getElementById('ctx-save-btn');
+            btn.disabled = true;
+            try {
+                const resp = await fetch(`${API_BASE}/api/community/${cid}/context`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const result = await resp.json();
+                if (resp.ok && result.success) {
+                    contextConfiguredCache[cid] = true;
+                    showToast('Настройки сохранены — ИИ будет учитывать их при генерации');
+                    hideContextModal();
+                    updateContextStatusLine();
+                } else {
+                    throw new Error(typeof result.detail === 'string' ? result.detail : JSON.stringify(result.detail));
+                }
+            } catch (e) {
+                showToast('Ошибка сохранения: ' + e.message, true);
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // Проверка контекста перед стартом работы с периодом; возвращает true,
+        // если можно продолжать (настроено / нет сообщества / пользователь отложил).
+        async function ensureContextConfigured() {
+            const cid = selectedCommunityId();
+            if (!cid) return true;
+            await loadContextState(cid);
+            if (contextConfiguredCache[cid] === false) {
+                showToast('Контекст сообщества не настроен — заполните настройки генерации', true);
+                openContextModal();
+                return false;
+            }
+            return true;
+        }
 
         // Utilities
         function showToast(message, isError = false) {
@@ -189,6 +470,12 @@
             if (!isoString) return '';
             const date = new Date(isoString);
             return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric' });
+        }
+
+        function formatDateTime(isoString) {
+            if (!isoString) return '';
+            const date = new Date(isoString);
+            return date.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
         }
 
         function getStatusBadge(status) {
@@ -340,6 +627,11 @@
                 document.getElementById('planActions').classList.remove('hidden');
                 loadChatMessages();
                 loadPeriodPosts();
+
+                // FIX (контекст): если контекст выбранного сообщества не настроен —
+                // показываем форму настроек перед началом чата.
+                const cid = selectedCommunityId();
+                if (cid && contextConfiguredCache[cid] === false) openContextModal();
             }
             
             renderPeriodsList();
@@ -347,6 +639,9 @@
 
         // Create period
         async function createPeriod(periodType) {
+            // FIX (контекст): если контекст сообщества не настроен — сначала показываем форму настроек
+            if (!(await ensureContextConfigured())) return;
+
             try {
                 const response = await fetch(`${API_BASE}/api/content-manager/period/create`, {
                     method: 'POST',
@@ -530,23 +825,30 @@
         function renderPostsList(posts) {
             const container = document.getElementById('postsList');
             const previewDiv = document.getElementById('postsPreview');
-            
+
+            lastPeriodPosts = posts || [];  // FIX (превью): кэш для модалки полного просмотра
+
             if (posts.length === 0) {
                 previewDiv.classList.add('hidden');
                 return;
             }
 
             previewDiv.classList.remove('hidden');
-            
+
             container.innerHTML = posts.map(p => `
-                <div class="border rounded-lg p-4 hover:bg-gray-50 transition">
+                <div class="border rounded-lg p-4 hover:bg-gray-50 transition post-preview-card" onclick="showPostPreview(${p.id})" title="Нажмите для полного просмотра">
                     <div class="flex justify-between items-start mb-2">
-                        <span class="font-medium text-gray-800">${p.topic || 'Без темы'}</span>
-                        <span class="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-600">${p.post_type}</span>
+                        <span class="font-medium text-gray-800">${p.topic ? escapeHtml(p.topic) : 'Без темы'}</span>
+                        <span class="px-2 py-1 text-xs rounded-full bg-gray-100 text-gray-600">${escapeHtml(p.post_type || '')}</span>
                     </div>
                     <div class="text-sm text-gray-600 line-clamp-2">
-                        ${(p.text_draft || p.text_final || '').substring(0, 150)}...
+                        ${escapeHtml((p.text_draft || p.text_final || '').substring(0, 150))}...
                     </div>
+                    ${(p.images && p.images.length) ? `
+                        <div class="flex gap-2 mt-2 flex-wrap">
+                            ${p.images.slice(0, 4).map(img => `<img src="${escapeHtml(img.image_url)}" alt="" class="h-14 w-14 object-cover rounded border border-gray-300" onerror="this.remove()">`).join('')}
+                            ${p.images.length > 4 ? `<span class="text-xs text-gray-500 self-center">+${p.images.length - 4}</span>` : ''}
+                        </div>` : ''}
                     <div class="mt-2 flex justify-between items-center">
                         <span class="text-xs text-gray-400">
                             ${p.publish_at ? 'Публикация: ' + formatDate(p.publish_at) : ''}
@@ -563,6 +865,63 @@
                     </div>
                 </div>
             `).join('');
+        }
+
+        // =====================================================================
+        // FIX (UI): Модалка полного превью поста из превью периода (Vanilla JS).
+        // Показывает полный текст (text_final || text_draft), ВСЕ изображения
+        // массива images галереей, дату публикации и статус.
+        // =====================================================================
+        function showPostPreview(postId) {
+            const post = lastPeriodPosts.find(p => p.id === postId);
+            if (!post) { showToast('Пост не найден в данных', true); return; }
+
+            document.getElementById('previewTitle').textContent =
+                `Пост #${post.id}${post.topic ? ': ' + post.topic : ''}`;
+            const statusBadges = {
+                published: '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">Опубликован</span>',
+                approved: '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800">Одобрен</span>',
+                draft: '<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">Черновик</span>',
+            };
+            document.getElementById('previewStatus').innerHTML = statusBadges[post.status] || escapeHtml(post.status || '');
+            document.getElementById('previewType').innerHTML =
+                `<span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-700">${escapeHtml(post.post_type || '')}</span>`;
+            const dates = [];
+            if (post.publish_at) dates.push('Публикация: ' + formatDateTime(post.publish_at));
+            if (post.published_at) dates.push('Опубликован: ' + formatDateTime(post.published_at));
+            document.getElementById('previewDates').textContent = dates.join(' · ');
+            document.getElementById('previewText').textContent = post.text_final || post.text_draft || '(текст отсутствует)';
+
+            let imgs = Array.isArray(post.images) ? post.images.slice() : [];
+            if (!imgs.length && post.image_url) imgs = [{ image_url: post.image_url, image_source: post.image_source }];
+            imgs.sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+            document.getElementById('previewImgCount').textContent = imgs.length;
+            const gallery = document.getElementById('previewGallery');
+            if (!imgs.length) {
+                gallery.innerHTML = '<div class="text-sm text-gray-400">Изображений нет</div>';
+            } else {
+                const sourceLabels = { ai: '🤖 ИИ', web_search: '🔎 Поиск', user_upload: '📤 Загрузка' };
+                gallery.innerHTML = imgs.map(img => `
+                    <div>
+                        <a href="${escapeHtml(img.image_url)}" target="_blank" rel="noopener" title="Открыть в новой вкладке">
+                            <img src="${escapeHtml(img.image_url)}" alt="Изображение поста" loading="lazy"
+                                 onerror="this.parentNode.outerHTML='<div class=&quot;text-xs text-red-500&quot;>⚠ Файл не найден</div>'">
+                        </a>
+                        ${img.image_source ? `<div class="text-xs text-gray-500 mt-1">${sourceLabels[img.image_source] || escapeHtml(img.image_source)}</div>` : ''}
+                    </div>
+                `).join('');
+            }
+
+            const modal = document.getElementById('postPreviewModal');
+            // Порядок важен: сначала убрать hidden, затем добавить flex.
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+
+        function hidePostPreview() {
+            const modal = document.getElementById('postPreviewModal');
+            modal.classList.remove('flex');
+            modal.classList.add('hidden');
         }
 
         // Check expiring plans
@@ -587,9 +946,29 @@
             }
         }
 
+        async function initContextCommunities() {
+            userCommunities = await fetchUserCommunities();
+            renderCommunitySelect();
+            // Кэш is_configured для каждого сообщества (для автопоказа формы настроек)
+            await Promise.all(userCommunities.map(c => loadContextState(c.id)));
+            renderPeriodsList();
+        }
+
         // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             loadPeriods();
+            initContextCommunities();
+        });
+
+        // FIX (UI): закрытие модалок по Escape и клику на затемнённый фон
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') { hidePostPreview(); hideContextModal(); }
+        });
+        document.getElementById('postPreviewModal')?.addEventListener('click', function(e) {
+            if (e.target === this) hidePostPreview();
+        });
+        document.getElementById('contextModal')?.addEventListener('click', function(e) {
+            if (e.target === this) hideContextModal();
         });
     </script>
 </body>

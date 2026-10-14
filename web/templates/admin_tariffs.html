@@ -1,0 +1,369 @@
+{% extends "admin_base.html" %}
+
+{% block title %}Тарифные планы — Админ-панель{% endblock %}
+
+{% block content %}
+<h1 class="text-3xl font-bold text-gray-800 mb-2">💎 Тарифные планы</h1>
+<p class="text-sm text-gray-500 mb-6">
+    Настройка тарифов: лимиты контент-плана, постов и сообществ, параметры изображений.
+    Данные загружаются через <code>GET /admin/tariffs</code>, сохраняются через
+    <code>POST /admin/tariffs</code>, удаляются через <code>DELETE /admin/tariffs/{id}</code>.
+</p>
+
+<!-- Форма создания/редактирования тарифа -->
+<div id="tariffFormCard" class="bg-white rounded-lg shadow p-6 max-w-2xl mb-6 hidden">
+    <h2 class="text-lg font-semibold text-gray-800 mb-4" id="tariffFormTitle">Новый тариф</h2>
+    <input type="hidden" id="tf-id">
+
+    <div class="space-y-4">
+        <div class="flex gap-4">
+            <div class="flex-1">
+                <label class="block text-sm font-medium text-gray-600 mb-1">Название</label>
+                <input type="text" id="tf-name" placeholder="Например: Базовый"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div class="w-40">
+                <label class="block text-sm font-medium text-gray-600 mb-1">Стоимость, ₽</label>
+                <input type="number" id="tf-cost" step="0.01" min="0" value="0"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+        </div>
+
+        <hr class="border-gray-200">
+        <h3 class="text-sm font-semibold text-gray-700">Лимиты</h3>
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Горизонт плана, дней</label>
+                <input type="number" id="tf-horizon" min="1" value="7"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Макс. рубрик</label>
+                <input type="number" id="tf-rubrics" min="1" value="3"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Макс. сообществ</label>
+                <input type="number" id="tf-communities" min="1" value="1"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Постов в день</label>
+                <input type="number" id="tf-per-day" min="0" value="1"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Постов в неделю</label>
+                <input type="number" id="tf-per-week" min="0" value="7"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+            <div>
+                <label class="block text-sm font-medium text-gray-600 mb-1">Постов в месяц</label>
+                <input type="number" id="tf-per-month" min="0" value="30"
+                       class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+            </div>
+        </div>
+
+        <hr class="border-gray-200">
+        <h3 class="text-sm font-semibold text-gray-700">Изображения</h3>
+        <div class="flex flex-wrap items-center gap-4">
+            <label class="inline-flex items-center text-sm font-medium text-gray-700">
+                <input type="checkbox" id="tf-allows-images" class="mr-2" onchange="onAllowsImagesChange()">
+                Разрешить картинки в постах
+            </label>
+            <div id="tf-images-fields" class="flex items-end gap-4">
+                <div class="w-40">
+                    <label class="block text-sm font-medium text-gray-600 mb-1">Макс. картинок в посте</label>
+                    <input type="number" id="tf-max-images" min="0" value="1"
+                           class="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-600 mb-1">Разрешённые источники</label>
+                    <div class="flex gap-3">
+                        <label class="inline-flex items-center text-sm text-gray-700">
+                            <input type="checkbox" class="tf-source mr-1" value="ai"> 🤖 ИИ
+                        </label>
+                        <label class="inline-flex items-center text-sm text-gray-700">
+                            <input type="checkbox" class="tf-source mr-1" value="web_search"> 🔎 Веб-поиск
+                        </label>
+                        <label class="inline-flex items-center text-sm text-gray-700">
+                            <input type="checkbox" class="tf-source mr-1" value="user_upload"> 📤 Загрузка
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="flex justify-end space-x-2 pt-2">
+            <button onclick="hideTariffForm()"
+                    class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-md">Отмена</button>
+            <button onclick="saveTariff()" id="tf-save-btn"
+                    class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-semibold disabled:opacity-50">
+                💾 Сохранить
+            </button>
+        </div>
+    </div>
+</div>
+
+<div class="mb-4">
+    <button onclick="showCreateTariffForm()"
+            class="bg-green-600 hover:bg-green-700 text-white font-semibold py-2 px-6 rounded-lg shadow transition duration-200">
+        + Создать тариф
+    </button>
+</div>
+
+<!-- Таблица тарифов -->
+<div class="bg-white rounded-lg shadow overflow-hidden">
+    <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-gray-200">
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Название</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Стоимость</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Лимиты постов (д/н/м)</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">План / рубрики / сообщества</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Картинки</th>
+                    <th class="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">Действия</th>
+                </tr>
+            </thead>
+            <tbody class="bg-white divide-y divide-gray-200" id="tariffsTableBody">
+                <tr><td colspan="7" class="px-4 py-4 text-center text-gray-500">Загрузка...</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Toast Notification -->
+<div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition duration-300 z-50">
+    <span id="toastMessage">Notification</span>
+</div>
+
+<script>
+    const API_BASE = '';
+
+    // ---------- Утилиты ----------
+    function showToast(message, isError = false) {
+        const toast = document.getElementById('toast');
+        document.getElementById('toastMessage').textContent = message;
+        toast.classList.remove('bg-gray-800', 'bg-green-600', 'bg-red-600');
+        toast.classList.add(isError ? 'bg-red-600' : 'bg-green-600');
+        toast.classList.add('toast-show');
+        clearTimeout(showToast._timer);
+        showToast._timer = setTimeout(() => toast.classList.remove('toast-show'), 3000);
+    }
+
+    // FIX (UI): локальный styles.css не содержит утилиту .toast-show — добавляем её
+    // инлайновым стилем, как в index.html, чтобы тост был видим.
+    const _toastStyle = document.createElement('style');
+    _toastStyle.textContent = '#toast{transition:opacity .3s ease,transform .3s ease}#toast.toast-show{opacity:1;transform:translateY(0)}';
+    document.head.appendChild(_toastStyle);
+
+    function escapeHtml(str) {
+        return String(str ?? '').replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[c]));
+    }
+
+    function parseSources(jsonStr) {
+        try {
+            const v = JSON.parse(jsonStr || '[]');
+            return Array.isArray(v) ? v : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    const SOURCE_LABELS = { ai: '🤖 ИИ', web_search: '🔎 Веб', user_upload: '📤 Загрузка' };
+
+    // ---------- Загрузка и рендер таблицы ----------
+    async function loadTariffs() {
+        const tbody = document.getElementById('tariffsTableBody');
+        try {
+            const resp = await fetch(`${API_BASE}/admin/tariffs`);
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const data = await resp.json();
+            renderTariffs(data.tariffs || []);
+        } catch (e) {
+            tbody.innerHTML = `<tr><td colspan="7" class="px-4 py-4 text-center text-red-500">Ошибка загрузки тарифов: ${escapeHtml(e.message)}</td></tr>`;
+        }
+    }
+
+    function renderTariffs(tariffs) {
+        const tbody = document.getElementById('tariffsTableBody');
+        if (!tariffs.length) {
+            tbody.innerHTML = '<tr><td colspan="7" class="px-4 py-4 text-center text-gray-500">Тарифов пока нет. Создайте первый!</td></tr>';
+            return;
+        }
+        tbody.innerHTML = tariffs.map(t => {
+            const sources = parseSources(t.allowed_image_sources)
+                .map(s => SOURCE_LABELS[s] || escapeHtml(s)).join(', ') || '—';
+            const imgCell = t.allows_images
+                ? `✅ до ${t.max_images_per_post} шт.<br><span class="text-xs text-gray-500">${sources}</span>`
+                : '<span class="text-gray-400">⛔ запрещены</span>';
+            return `
+                <tr class="hover:bg-gray-50">
+                    <td class="px-4 py-3 text-sm text-gray-900">#${t.id}</td>
+                    <td class="px-4 py-3 text-sm font-semibold text-gray-900">${escapeHtml(t.name)}</td>
+                    <td class="px-4 py-3 text-sm text-gray-900">${Number(t.cost).toLocaleString('ru-RU')} ₽</td>
+                    <td class="px-4 py-3 text-sm text-gray-600">${t.max_posts_per_day} / ${t.max_posts_per_week} / ${t.max_posts_per_month}</td>
+                    <td class="px-4 py-3 text-sm text-gray-600">${t.max_plan_horizon_days} дн. / ${t.max_rubrics} рубр. / ${t.max_communities} сообщ.</td>
+                    <td class="px-4 py-3 text-sm text-gray-600">${imgCell}</td>
+                    <td class="px-4 py-3 text-sm text-right whitespace-nowrap">
+                        <button onclick="editTariff(${t.id})" class="text-blue-600 hover:text-blue-900 mr-3">✏️ Ред.</button>
+                        <button onclick="deleteTariff(${t.id})" class="text-red-600 hover:text-red-800">🗑 Удалить</button>
+                    </td>
+                </tr>`;
+        }).join('');
+    }
+
+    // ---------- Форма ----------
+    let allTariffs = [];
+
+    function setField(id, value) { document.getElementById(id).value = value; }
+
+    function onAllowsImagesChange() {
+        const allowed = document.getElementById('tf-allows-images').checked;
+        document.querySelectorAll('#tf-images-fields input').forEach(inp => { inp.disabled = !allowed; });
+        document.getElementById('tf-images-fields').classList.toggle('opacity-50', !allowed);
+    }
+
+    function showTariffForm() {
+        document.getElementById('tariffFormCard').classList.remove('hidden');
+        document.getElementById('tariffFormCard').scrollIntoView({ behavior: 'smooth' });
+    }
+
+    function hideTariffForm() {
+        document.getElementById('tariffFormCard').classList.add('hidden');
+    }
+
+    function resetForm() {
+        setField('tf-id', '');
+        setField('tf-name', '');
+        setField('tf-cost', 0);
+        setField('tf-horizon', 7);
+        setField('tf-rubrics', 3);
+        setField('tf-communities', 1);
+        setField('tf-per-day', 1);
+        setField('tf-per-week', 7);
+        setField('tf-per-month', 30);
+        document.getElementById('tf-allows-images').checked = false;
+        setField('tf-max-images', 1);
+        document.querySelectorAll('.tf-source').forEach(cb => { cb.checked = false; cb.disabled = false; });
+        onAllowsImagesChange();
+        document.getElementById('tariffFormTitle').textContent = 'Новый тариф';
+    }
+
+    function showCreateTariffForm() {
+        resetForm();
+        showTariffForm();
+    }
+
+    function editTariff(id) {
+        const t = allTariffs.find(x => x.id === id);
+        if (!t) { showToast('Тариф не найден — обновите страницу', true); return; }
+        resetForm();
+        document.getElementById('tariffFormTitle').textContent = `Редактирование: ${t.name}`;
+        setField('tf-id', t.id);
+        setField('tf-name', t.name);
+        setField('tf-cost', t.cost);
+        setField('tf-horizon', t.max_plan_horizon_days);
+        setField('tf-rubrics', t.max_rubrics);
+        setField('tf-communities', t.max_communities);
+        setField('tf-per-day', t.max_posts_per_day);
+        setField('tf-per-week', t.max_posts_per_week);
+        setField('tf-per-month', t.max_posts_per_month);
+        document.getElementById('tf-allows-images').checked = !!t.allows_images;
+        setField('tf-max-images', t.max_images_per_post);
+        const sources = parseSources(t.allowed_image_sources);
+        document.querySelectorAll('.tf-source').forEach(cb => { cb.checked = sources.includes(cb.value); });
+        onAllowsImagesChange();
+        showTariffForm();
+    }
+
+    async function saveTariff() {
+        const name = document.getElementById('tf-name').value.trim();
+        if (!name) { showToast('Укажите название тарифа', true); return; }
+
+        const idVal = document.getElementById('tf-id').value;
+        const allowsImages = document.getElementById('tf-allows-images').checked;
+        const sources = [...document.querySelectorAll('.tf-source:checked')].map(cb => cb.value);
+        if (allowsImages && !sources.length) {
+            showToast('Выберите хотя бы один разрешённый источник картинок', true);
+            return;
+        }
+
+        const payload = {
+            name: name,
+            cost: parseFloat(document.getElementById('tf-cost').value || '0'),
+            max_plan_horizon_days: parseInt(document.getElementById('tf-horizon').value || '0', 10),
+            max_rubrics: parseInt(document.getElementById('tf-rubrics').value || '0', 10),
+            max_posts_per_day: parseInt(document.getElementById('tf-per-day').value || '0', 10),
+            max_posts_per_week: parseInt(document.getElementById('tf-per-week').value || '0', 10),
+            max_posts_per_month: parseInt(document.getElementById('tf-per-month').value || '0', 10),
+            max_communities: parseInt(document.getElementById('tf-communities').value || '0', 10),
+            allows_images: allowsImages,
+            max_images_per_post: allowsImages ? parseInt(document.getElementById('tf-max-images').value || '0', 10) : 0,
+            allowed_image_sources: JSON.stringify(allowsImages ? sources : []),
+        };
+        if (idVal) payload.id = parseInt(idVal, 10);
+
+        const btn = document.getElementById('tf-save-btn');
+        btn.disabled = true;
+        try {
+            const resp = await fetch(`${API_BASE}/admin/tariffs`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const result = await resp.json();
+            if (resp.ok && result.success) {
+                showToast(idVal ? 'Тариф обновлён' : 'Тариф создан');
+                hideTariffForm();
+                await reloadTariffs();
+            } else {
+                throw new Error(typeof result.detail === 'string' ? result.detail : JSON.stringify(result.detail));
+            }
+        } catch (e) {
+            showToast('Ошибка сохранения: ' + e.message, true);
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    async function deleteTariff(id) {
+        const t = allTariffs.find(x => x.id === id);
+        if (!confirm(`Удалить тариф «${t ? t.name : id}»? У привязанных пользователей тариф сбросится.`)) return;
+        try {
+            const resp = await fetch(`${API_BASE}/admin/tariffs/${id}`, { method: 'DELETE' });
+            const result = await resp.json();
+            if (resp.ok && result.success) {
+                showToast('Тариф удалён');
+                await reloadTariffs();
+            } else {
+                throw new Error(typeof result.detail === 'string' ? result.detail : 'Ошибка удаления');
+            }
+        } catch (e) {
+            showToast(e.message, true);
+        }
+    }
+
+    async function reloadTariffs() {
+        try {
+            const resp = await fetch(`${API_BASE}/admin/tariffs`);
+            const data = await resp.json();
+            allTariffs = data.tariffs || [];
+            renderTariffs(allTariffs);
+        } catch (e) { /* уже показан в loadTariffs */ }
+    }
+
+    // Перехватываем loadTariffs, чтобы держать кэш allTariffs для редактирования
+    const _origLoad = loadTariffs;
+    loadTariffs = async function () {
+        await reloadTariffs();
+        void _origLoad;
+    };
+
+    document.addEventListener('DOMContentLoaded', loadTariffs);
+</script>
+{% endblock %}

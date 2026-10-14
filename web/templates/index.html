@@ -26,6 +26,19 @@
             opacity: 1;
             transform: translateY(0);
         }
+        /* FIX (UI): утилитарные классы, использованные в модалке превью поста,
+           но отсутствующие в локальном styles.css (без внешних CDN). */
+        .max-w-2xl { max-width: 42rem; }
+        .max-h-\[90vh\] { max-height: 90vh; }
+        .rounded-t-lg { border-top-left-radius: .5rem; border-top-right-radius: .5rem; }
+        .sticky { position: sticky; }
+        .top-0 { top: 0; }
+        .whitespace-pre-wrap { white-space: pre-wrap; }
+        .leading-none { line-height: 1; }
+        .gap-3 { gap: .75rem; }
+        /* Миниатюры галереи превью */
+        #previewGallery img { width: 100%; height: 8rem; object-fit: cover; border-radius: .375rem; border: 1px solid #d1d5db; cursor: zoom-in; }
+        tr.post-row { cursor: pointer; }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -146,6 +159,34 @@
         </div>
     </div>
 
+    <!-- FIX (UI): Модалка полного превью поста. Открывается кликом по строке таблицы;
+         отображает полный текст (text_final || text_draft), ВСЕ изображения поста
+         (массив images из GET /api/posts) галереей, дату публикации и статус. -->
+    <div id="postPreviewModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-lg max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto shadow-lg">
+            <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center sticky top-0 bg-white rounded-t-lg">
+                <h3 class="text-lg font-semibold text-gray-800" id="previewTitle">Пост</h3>
+                <button onclick="hidePostPreview()" class="px-2 py-1 text-gray-500 hover:bg-gray-100 rounded-md text-xl leading-none" title="Закрыть">&times;</button>
+            </div>
+            <div class="p-6">
+                <div class="flex flex-wrap gap-2 items-center mb-4">
+                    <span id="previewStatus"></span>
+                    <span id="previewType"></span>
+                    <span class="text-xs text-gray-500" id="previewDates"></span>
+                </div>
+                <h4 class="text-base font-semibold text-gray-800 mb-2" id="previewTopic"></h4>
+                <div id="previewText" class="text-sm text-gray-700 mb-4 whitespace-pre-wrap"></div>
+                <div id="previewGalleryBlock">
+                    <div class="text-sm font-medium text-gray-600 mb-2">Изображения (<span id="previewImgCount">0</span>):</div>
+                    <div id="previewGallery" class="grid grid-cols-2 md:grid-cols-3 gap-2"></div>
+                </div>
+            </div>
+            <div class="px-6 py-4 border-t border-gray-200 flex justify-end space-x-2">
+                <button onclick="hidePostPreview()" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-md">Закрыть</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Notification -->
     <div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition duration-300">
         <span id="toastMessage">Notification</span>
@@ -161,6 +202,21 @@
         // FIX: Пагинация /api/posts
         let postsSkip = 0;
         const postsLimit = 20;
+        // FIX (превью): кэш последних загруженных постов — модалка открывает
+        // карточку мгновенно без повторного запроса к API.
+        let lastLoadedPosts = [];
+
+        function escapeHtml(str) {
+            return String(str ?? '').replace(/[&<>"']/g, c => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            }[c]));
+        }
+
+        function formatDateTime(isoString) {
+            if (!isoString) return '';
+            const d = new Date(isoString);
+            return d.toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+        }
 
         // Утилиты
         function showToast(message, isError = false) {
@@ -250,29 +306,30 @@
 
         function renderPosts(posts) {
             const tbody = document.getElementById('postsTableBody');
+            lastLoadedPosts = posts || [];  // FIX (превью): кэш для модалки
             if (posts.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="7" class="px-6 py-4 text-center text-gray-500">Постов пока нет. Нажмите "Сгенерировать пак"</td></tr>`;
                 return;
             }
 
             tbody.innerHTML = posts.map(post => `
-                <tr class="hover:bg-gray-50">
+                <tr class="hover:bg-gray-50 post-row" onclick="showPostPreview(${post.id})" title="Нажмите для полного превью">
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">#${post.id}</td>
                     <td class="px-6 py-4 whitespace-nowrap">${getTypeBadge(post.post_type)}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900 max-w-xs truncate">${post.topic || '-'}</td>
                     <td class="px-6 py-4 text-sm text-gray-500 max-w-xs truncate">${(post.text_final || post.text_draft || '').substring(0, 60)}...</td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm">
-                        ${post.image_url ? 
-                            `<a href="${post.image_url}" target="_blank" title="Открыть изображение в новой вкладке"><img src="${post.image_url}" alt="Изображение поста #${post.id}" class="h-12 w-12 object-cover rounded border border-gray-300 hover:opacity-80 transition" onerror="this.closest('a').outerHTML='<span class=&quot;text-red-500&quot;>⚠ Файл не найден</span>'"></a>` : 
+                        ${(post.images && post.images.length) || post.image_url ?
+                            `<span class="inline-flex items-center"><img src="${(post.images && post.images[0] ? post.images[0].image_url : post.image_url)}" alt="Изображение поста #${post.id}" class="h-12 w-12 object-cover rounded border border-gray-300" onerror="this.outerHTML='<span class=&quot;text-red-500&quot;>⚠ Файл не найден</span>'">${(post.images && post.images.length > 1) ? `<span class="ml-1 text-xs text-gray-500">+${post.images.length - 1}</span>` : ''}</span>` :
                             `<span class="text-gray-400">Нет</span>`}
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap">${getStatusBadge(post.status)}</td>
                     <td class="px-6 py-4 whitespace-nowrap text-sm font-medium">
                         ${post.status === 'draft' ? `
-                            <button onclick="approvePost(${post.id})" class="text-blue-600 hover:text-blue-900 mr-3">Одобрить</button>
+                            <button onclick="event.stopPropagation(); approvePost(${post.id})" class="text-blue-600 hover:text-blue-900 mr-3">Одобрить</button>
                         ` : ''}
                         ${post.status === 'approved' ? `
-                            <button onclick="publishPost(${post.id})" class="text-green-600 hover:text-green-900">В ВК</button>
+                            <button onclick="event.stopPropagation(); publishPost(${post.id})" class="text-green-600 hover:text-green-900">В ВК</button>
                         ` : ''}
                         ${post.status === 'published' ? `
                             <span class="text-gray-400">Готово</span>
@@ -280,6 +337,77 @@
                     </td>
                 </tr>
             `).join('');
+        }
+
+        // =====================================================================
+        // FIX (UI): Модалка полного превью поста (Vanilla JS).
+        // Открывается кликом по строке таблицы; показывает полный текст
+        // (text_final || text_draft), ВСЕ изображения массива images галереей,
+        // дату публикации и статус. Данные берутся из кэша loadPosts(),
+        // при промахе — один точечный запрос к API.
+        // =====================================================================
+        async function showPostPreview(postId) {
+            let post = lastLoadedPosts.find(p => p.id === postId);
+            if (!post) {
+                try {
+                    const resp = await fetch(`${API_BASE}/api/posts?skip=0&limit=1000`);
+                    if (resp.ok) {
+                        const all = await resp.json();
+                        post = (all || []).find(p => p.id === postId);
+                    }
+                } catch (e) { /* обработано ниже */ }
+            }
+            if (!post) {
+                showToast('Не удалось загрузить пост', true);
+                return;
+            }
+
+            document.getElementById('previewTitle').textContent = `Пост #${post.id}`;
+            document.getElementById('previewStatus').innerHTML = getStatusBadge(post.status);
+            document.getElementById('previewType').innerHTML = getTypeBadge(post.post_type);
+            document.getElementById('previewTopic').textContent = post.topic || 'Без темы';
+
+            const dates = [];
+            if (post.publish_at) dates.push('Публикация: ' + formatDateTime(post.publish_at));
+            if (post.published_at) dates.push('Опубликован: ' + formatDateTime(post.published_at));
+            document.getElementById('previewDates').textContent = dates.join(' · ');
+
+            const fullText = post.text_final || post.text_draft || '(текст отсутствует)';
+            document.getElementById('previewText').textContent = fullText;
+
+            // Галерея всех изображений поста (массив images из API); фолбэк — image_url.
+            let imgs = Array.isArray(post.images) ? post.images.slice() : [];
+            if (!imgs.length && post.image_url) {
+                imgs = [{ image_url: post.image_url, image_source: post.image_source }];
+            }
+            imgs.sort((a, b) => (a.order_index ?? 0) - (b.order_index ?? 0));
+            document.getElementById('previewImgCount').textContent = imgs.length;
+            const gallery = document.getElementById('previewGallery');
+            if (!imgs.length) {
+                gallery.innerHTML = '<div class="text-sm text-gray-400">Изображений нет</div>';
+            } else {
+                const sourceLabels = { ai: '🤖 ИИ', web_search: '🔎 Поиск', user_upload: '📤 Загрузка' };
+                gallery.innerHTML = imgs.map(img => `
+                    <div>
+                        <a href="${escapeHtml(img.image_url)}" target="_blank" rel="noopener" title="Открыть в новой вкладке">
+                            <img src="${escapeHtml(img.image_url)}" alt="Изображение поста" loading="lazy"
+                                 onerror="this.parentNode.outerHTML='<div class=&quot;text-xs text-red-500&quot;>⚠ Файл не найден</div>'">
+                        </a>
+                        ${img.image_source ? `<div class="text-xs text-gray-500 mt-1">${sourceLabels[img.image_source] || escapeHtml(img.image_source)}</div>` : ''}
+                    </div>
+                `).join('');
+            }
+
+            const modal = document.getElementById('postPreviewModal');
+            // FIX (UI): порядок как в showAddTokenModal — сначала убрать hidden, затем flex.
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+
+        function hidePostPreview() {
+            const modal = document.getElementById('postPreviewModal');
+            modal.classList.remove('flex');
+            modal.classList.add('hidden');
         }
 
         function updateStats(posts) {
@@ -583,6 +711,14 @@
         document.getElementById('communitySelect')?.addEventListener('change', function(e) {
             currentGroupId = e.target.value ? parseInt(e.target.value) : null;
             // Здесь можно добавить логику фильтрации постов по сообществу
+        });
+
+        // FIX (UI): закрытие модалки превью по Escape и клику на затемнённый фон
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') hidePostPreview();
+        });
+        document.getElementById('postPreviewModal')?.addEventListener('click', function(e) {
+            if (e.target === this) hidePostPreview();
         });
 
         // FIX (UX): восстановление статуса активной генерации после перезагрузки
