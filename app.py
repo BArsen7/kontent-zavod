@@ -12,7 +12,7 @@ import bcrypt as _bcrypt
 from sqlalchemy import func as sa_func, or_  # FIX: or_ — фильтр своих постов в /api/posts
 from sqlalchemy.exc import OperationalError  # FIX: устойчивое чтение SystemSetting (fallback при битой таблице)
 
-from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Form, Query
+from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks, Request, Form, Query, UploadFile, File
 from fastapi.concurrency import run_in_threadpool  # FIX: Event loop unblocked
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +21,41 @@ from fastapi.responses import RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+
+
+class TariffPlanPayload(BaseModel):
+    """Тело запроса создания/обновления тарифного плана (эндпоинты /admin/tariffs)."""
+
+    id: Optional[int] = None  # если задан — обновление существующего плана
+    name: str
+    cost: float = 0.0
+    max_plan_horizon_days: int = 7
+    max_rubrics: int = 3
+    max_posts_per_day: int = 1
+    max_posts_per_week: int = 7
+    max_posts_per_month: int = 30
+    max_communities: int = 1
+    allows_images: bool = False
+    max_images_per_post: int = 1
+    allowed_image_sources: Optional[str] = None  # JSON-строка, напр. '["ai","web_search"]'
+
+
+class CommunityContextPayload(BaseModel):
+    """Тело запроса сохранения настроек генерации сообщества."""
+
+    goal: Optional[str] = None
+    community_specifics: Optional[str] = None
+    target_audience: Optional[str] = None
+    current_state_and_what_works: Optional[str] = None
+    image_source_preferences: Optional[Any] = None  # список или JSON-строка
+
+
+class PostImagesPayload(BaseModel):
+    """Обновление списка изображений поста (PostImage)."""
+
+    images: List[Dict[str, Any]] = []  # [{url|image_url, source|image_source}]
+
+
 from sqlalchemy.orm import Session
 
 from config import settings
@@ -29,16 +64,20 @@ from services.gigachat_client import is_gigachat_configured
 # FIX: Ненадёжные сессии в памяти -> персистентная модель Session в БД
 from models import (
     ChatMessage,
+    CommunityGenerationContext,
     ContentPlanPeriod,
     Post,
+    PostImage,
     Session as DbSession,
     SystemSetting,
+    TariffPlan,
     User,
     UserCommunity,
 )
 from services.content_service import generate_weekly_pack, PACK_PERIODS
 from services.content_manager_service import (
     get_or_create_content_plan_period,
+    get_or_create_generation_context,
     get_chat_history,
     generate_ai_response,
     get_user_community_info,
@@ -47,6 +86,7 @@ from services.content_manager_service import (
     update_existing_plan,
     check_and_regenerate_expiring_plan,
 )
+from services.image_search_service import search_images_web
 from managers.community_manager import CommunityManager
 from vk_errors import create_vk_session, describe_api_error, positive_group_id
 from services.scheduler import start_scheduler
@@ -1163,22 +1203,64 @@ def get_posts(
         .all()
     )
     
-    return [
-        {
-            "id": post.id,
-            "content_plan_id": post.content_plan_id,
-            "post_type": post.post_type,
-            "topic": post.topic,
-            "text_draft": post.text_draft,
-            "text_final": post.text_final,
-            "image_url": post.image_url,
-            "image_source": post.image_source,
-            "status": post.status,
-            "publish_at": post.publish_at.isoformat() if post.publish_at else None,
-            "published_at": post.published_at.isoformat() if post.published_at else None,
-        }
-        for post in posts
-    ]
+    # FIX (мультикартинки): сериализация через _serialize_post — возвращаем
+    # также вложенный список images (PostImage, упорядочен по order_index).
+    # Примечание: это синхронный роут — FastAPI выполняет его целиком в
+    # threadpool, поэтому lazy load связей не блокирует event loop.
+    return [_serialize_post(post) for post in posts]
+
+
+def _serialize_post(post: Post) -> Dict[str, Any]:
+    """Сериализует пост для API, включая вложенный список изображений (PostImage).
+
+    Поле image_url сохранено для обратной совместимости; images — упорядоченный
+    по order_index список картинок поста.
+    """
+    return {
+        "id": post.id,
+        "content_plan_id": post.content_plan_id,
+        "post_type": post.post_type,
+        "topic": post.topic,
+        "text_draft": post.text_draft,
+        "text_final": post.text_final,
+        "image_url": post.image_url,
+        "image_source": post.image_source,
+        "images": [
+            {
+                "id": img.id,
+                "image_url": img.image_url,
+                "image_source": img.image_source,
+                "order_index": img.order_index,
+            }
+            for img in post.images
+        ],
+        "status": post.status,
+        "publish_at": post.publish_at.isoformat() if post.publish_at else None,
+        "published_at": post.published_at.isoformat() if post.published_at else None,
+    }
+
+
+def _set_post_images(db: Session, post: Post, images_payload: List[Any]) -> None:
+    """Заменяет список изображений поста (PostImage) на присланный.
+
+    Args:
+        db: Сессия базы данных
+        post: Пост, которому назначаются изображения
+        images_payload: список [{url|image_url, source|image_source}] или строк —
+            порядок в списке задаёт order_index. Пустой список очищает связи
+            (cascade delete-orphan удаляет записи PostImage).
+    """
+    post.images = []  # старые записи удаляются каскадом
+    for idx, item in enumerate(images_payload or []):
+        if isinstance(item, str):
+            item = {"url": item}
+        url = (item.get("url") or item.get("image_url") or "").strip()
+        if not url:
+            continue
+        source = item.get("source") or item.get("image_source")
+        post.images.append(
+            PostImage(image_url=url, image_source=source, order_index=idx)
+        )
 
 
 def _to_web_media_path(image_path):
@@ -2236,6 +2318,16 @@ def get_period_posts(  # FIX: Event loop unblocked — синхронный ро
                 "topic": p.topic,
                 "text_draft": p.text_draft,
                 "text_final": p.text_final,
+                # FIX (мультикартинки): вложенный список изображений поста
+                "images": [
+                    {
+                        "id": img.id,
+                        "image_url": img.image_url,
+                        "image_source": img.image_source,
+                        "order_index": img.order_index,
+                    }
+                    for img in p.images
+                ],
                 "status": p.status,
                 "publish_at": p.publish_at.isoformat() if p.publish_at else None,
                 "published_at": p.published_at.isoformat() if p.published_at else None

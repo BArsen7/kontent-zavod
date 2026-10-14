@@ -1,13 +1,101 @@
+import json
 import logging
 import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from sqlalchemy.orm import Session
 
-from models import ContentPlanPeriod, ChatMessage, Post, UserCommunity
+from models import (
+    CommunityGenerationContext,
+    ContentPlanPeriod,
+    ChatMessage,
+    Post,
+    UserCommunity,
+)
 from generators.text_generator import generate_text
 
 logger = logging.getLogger(__name__)
+
+# Строгий структурированный вопрос, который ИИ обязан задать первым,
+# пока сообщество не настроено (CommunityGenerationContext.is_configured == False).
+CONTEXT_SETUP_QUESTION = (
+    "Для настройки генерации ответьте: "
+    "1) Цель, 2) Специфика, 3) ЦА, 4) Что уже работает, "
+    "5) Предпочтения по картинкам (ИИ/Поиск/Загрузка)"
+)
+
+
+def get_or_create_generation_context(
+    db: Session,
+    user_community_id: int
+) -> CommunityGenerationContext:
+    """Возвращает (или создаёт с is_configured=False) контекст генерации сообщества.
+
+    Args:
+        db: Сессия базы данных
+        user_community_id: ID записи UserCommunity
+
+    Returns:
+        CommunityGenerationContext: запись настроек генерации
+    """
+    ctx = db.query(CommunityGenerationContext).filter(
+        CommunityGenerationContext.user_community_id == user_community_id
+    ).first()
+
+    if ctx is None:
+        ctx = CommunityGenerationContext(
+            user_community_id=user_community_id,
+            is_configured=False,
+        )
+        db.add(ctx)
+        db.commit()
+        db.refresh(ctx)
+
+    return ctx
+
+
+def _period_user_community(db: Session, period: ContentPlanPeriod) -> Optional[UserCommunity]:
+    """Возвращает первое сообщество пользователя периода (для привязки контекста)."""
+    return db.query(UserCommunity).filter(
+        UserCommunity.user_id == period.user_id
+    ).order_by(UserCommunity.id.asc()).first()
+
+
+def build_context_block(db: Session, period: ContentPlanPeriod) -> str:
+    """Формирует блок <CONTEXT>...</CONTEXT> из CommunityGenerationContext.
+
+    Если для сообщества пользователя есть настроенный контекст
+    (is_configured == True), его данные внедряются в системный промпт LLM.
+    Иначе возвращается пустая строка.
+    """
+    community = _period_user_community(db, period)
+    if community is None:
+        return ""
+
+    ctx = db.query(CommunityGenerationContext).filter(
+        CommunityGenerationContext.user_community_id == community.id
+    ).first()
+
+    if ctx is None or not ctx.is_configured:
+        return ""
+
+    # image_source_preferences — JSON-строка; парсим безопасно для отображения
+    try:
+        prefs = json.loads(ctx.image_source_preferences or "[]")
+        prefs_str = ", ".join(str(p) for p in prefs) if isinstance(prefs, list) else str(prefs)
+    except (ValueError, TypeError):
+        prefs_str = ctx.image_source_preferences or ""
+
+    return (
+        "<CONTEXT>\n"
+        f"Сообщество: {community.group_name or community.group_id}\n"
+        f"Цель: {ctx.goal or 'не указана'}\n"
+        f"Специфика сообщества: {ctx.community_specifics or 'не указана'}\n"
+        f"Целевая аудитория: {ctx.target_audience or 'не указана'}\n"
+        f"Что уже есть и что работает: {ctx.current_state_and_what_works or 'не указано'}\n"
+        f"Предпочтения по источникам картинок: {prefs_str or 'не указаны'}\n"
+        "</CONTEXT>"
+    )
 
 
 def _default_use_local(db: Session) -> bool:
@@ -350,6 +438,24 @@ def generate_content_plan_from_chat(
     
     if not period:
         raise ValueError("Период контент-плана не найден")
+
+    # FIX (контекст генерации): проверяем CommunityGenerationContext сообщества.
+    community = _period_user_community(db, period)
+    gen_ctx: Optional[CommunityGenerationContext] = None
+    if community is not None:
+        gen_ctx = db.query(CommunityGenerationContext).filter(
+            CommunityGenerationContext.user_community_id == community.id
+        ).first()
+
+    # Если сообщество ещё не настроено (первый диалог) — первый ответ ИИ
+    # должен быть строго структурированным вопросом о настройке, а не планом.
+    if gen_ctx is not None and not gen_ctx.is_configured:
+        add_chat_message(db, period_id, "assistant", CONTEXT_SETUP_QUESTION)
+        logger.info(
+            f"Период {period_id}: контекст сообщества {community.id} не настроен — "
+            "возвращён структурированный вопрос настройки"
+        )
+        return [{"setup_required": True, "question": CONTEXT_SETUP_QUESTION}]
     
     # Получаем историю чата для контекста
     chat_history = get_chat_history(db, period_id)
@@ -391,9 +497,19 @@ def generate_content_plan_from_chat(
         from generators.text_generator import generate_text
         import json
         
+        # FIX (внедрение контекста): данные CommunityGenerationContext
+        # (is_configured == True) добавляются в системный промпт LLM
+        # как блок <CONTEXT>...</CONTEXT>.
+        plan_system_prompt = (
+            "Ты эксперт по контент-маркетингу. Верни ТОЛЬКО JSON без дополнительного текста."
+        )
+        context_block = build_context_block(db, period)
+        if context_block:
+            plan_system_prompt = f"{plan_system_prompt}\n\n{context_block}"
+
         ai_response = generate_text(
             prompt=prompt,
-            system_prompt="Ты эксперт по контент-маркетингу. Верни ТОЛЬКО JSON без дополнительного текста.",
+            system_prompt=plan_system_prompt,
             use_local=_default_use_local(db),
         )
         
