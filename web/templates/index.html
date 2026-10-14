@@ -187,6 +187,48 @@
         </div>
     </div>
 
+    <!-- FIX (UI, задание 3): Модалка управления изображениями поста:
+         - drag & drop зона + input type=file multiple -> POST /api/upload-image;
+         - поиск картинок по ключевому слову -> GET /api/search-images (сетка, клик = добавить);
+         - лимит выбора по тарифу (GET /api/tariff-info: max_images_per_post, allowed_image_sources). -->
+    <div id="imagesModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-lg max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto shadow-lg">
+            <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center sticky top-0 bg-white rounded-t-lg">
+                <h3 class="text-lg font-semibold text-gray-800" id="imagesModalTitle">Изображения поста</h3>
+                <button onclick="hideImagesModal()" class="px-2 py-1 text-gray-500 hover:bg-gray-100 rounded-md text-xl leading-none" title="Закрыть">&times;</button>
+            </div>
+            <div class="p-6">
+                <div class="text-sm text-gray-600 mb-3" id="imagesTariffHint">Загрузка лимитов тарифа…</div>
+
+                <div class="mb-4">
+                    <div class="text-sm font-medium text-gray-600 mb-2">Выбранные изображения (<span id="selectedImgCount">0</span>):</div>
+                    <div id="selectedImagesGrid" class="grid grid-cols-2 md:grid-cols-3 gap-2"></div>
+                </div>
+
+                <div id="dropZone" class="border-2 border-dashed border-gray-300 rounded-md p-6 text-center text-sm text-gray-500 mb-4 cursor-pointer hover:border-blue-400 transition duration-200">
+                    📤 Перетащите картинки сюда или нажмите для выбора файлов (до <span id="dropMaxFiles">—</span>)
+                    <input type="file" id="imageFileInput" accept="image/*" multiple class="hidden">
+                </div>
+                <div id="uploadProgress" class="hidden text-sm text-gray-600 mb-3 flex items-center gap-2">
+                    <div class="loader ease-linear rounded-full border-2 border-t-2 border-gray-200 h-4 w-4"></div>
+                    Загружаем файлы…
+                </div>
+
+                <div class="flex gap-2 mb-3">
+                    <input type="text" id="imgSearchQuery" class="flex-grow border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Поиск картинок по ключевому слову…">
+                    <button onclick="searchImagesForPost()" id="imgSearchBtn" class="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white text-sm rounded-md whitespace-nowrap disabled:opacity-50">🔎 Найти</button>
+                </div>
+                <div id="searchResultsGrid" class="grid grid-cols-3 md:grid-cols-4 gap-2 mb-4"></div>
+
+                <div id="webSourceNote" class="hidden text-xs text-gray-500 mb-3">⚠️ Для вашего тарифа доступен только web-поиск — загруженные пользователем файлы при сохранении использоваться не будут.</div>
+            </div>
+            <div class="px-6 py-4 border-t border-gray-200 flex justify-end space-x-2 sticky bottom-0 bg-white rounded-b-lg">
+                <button onclick="hideImagesModal()" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-md">Отмена</button>
+                <button onclick="savePostImages()" id="saveImagesBtn" class="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md disabled:opacity-50">💾 Сохранить изображения</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Toast Notification -->
     <div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition duration-300">
         <span id="toastMessage">Notification</span>
@@ -328,6 +370,9 @@
                         ${post.status === 'draft' ? `
                             <button onclick="event.stopPropagation(); approvePost(${post.id})" class="text-blue-600 hover:text-blue-900 mr-3">Одобрить</button>
                         ` : ''}
+                        ${post.status !== 'published' ? `
+                            <button onclick="event.stopPropagation(); openImagesModal(${post.id})" class="text-purple-600 hover:text-purple-900 mr-3">🖼 Картинки</button>
+                        ` : ''}
                         ${post.status === 'approved' ? `
                             <button onclick="event.stopPropagation(); publishPost(${post.id})" class="text-green-600 hover:text-green-900">В ВК</button>
                         ` : ''}
@@ -408,6 +453,210 @@
             const modal = document.getElementById('postPreviewModal');
             modal.classList.remove('flex');
             modal.classList.add('hidden');
+        }
+
+        // =====================================================================
+        // FIX (UI, задание 3): Управление изображениями поста (мультикартинки).
+        // Модалка: drag&drop / input multiple -> POST /api/upload-image;
+        // поиск -> GET /api/search-images; сохранение -> PUT /api/posts/{id}.
+        // Лимиты берутся из GET /api/tariff-info (max_images_per_post,
+        // allowed_image_sources) — кэш tariffLimits на время сессии страницы.
+        // =====================================================================
+        let currentImagesPostId = null;
+        let selectedPostImages = [];   // [{url, source}]
+        let tariffLimits = null;       // {allows_images, max_images_per_post, allowed_image_sources}
+
+        async function loadTariffLimits(force = false) {
+            if (tariffLimits && !force) return tariffLimits;
+            try {
+                const resp = await fetch(`${API_BASE}/api/tariff-info`);
+                if (!resp.ok) throw new Error(resp.status);
+                const data = await resp.json();
+                tariffLimits = data.limits || { allows_images: false, max_images_per_post: 0, allowed_image_sources: [] };
+            } catch (e) {
+                tariffLimits = { allows_images: false, max_images_per_post: 0, allowed_image_sources: [] };
+            }
+            return tariffLimits;
+        }
+
+        async function openImagesModal(postId) {
+            await loadTariffLimits();
+            const post = lastLoadedPosts.find(p => p.id === postId);
+            if (!tariffLimits.allows_images || tariffLimits.max_images_per_post < 1) {
+                showToast('Картинки запрещены вашим тарифом', true);
+                return;
+            }
+            currentImagesPostId = postId;
+            selectedPostImages = (post && Array.isArray(post.images) && post.images.length)
+                ? post.images.map(i => ({ url: i.image_url, source: i.image_source }))
+                : (post && post.image_url ? [{ url: post.image_url, source: post.image_source || 'user_upload' }] : []);
+
+            document.getElementById('imagesModalTitle').textContent = `Изображения поста #${postId}`;
+            const srcs = tariffLimits.allowed_image_sources || [];
+            const names = { ai: 'ИИ', web_search: 'веб-поиск', user_upload: 'загрузка' };
+            document.getElementById('imagesTariffHint').innerHTML =
+                `Тариф: до <b>${tariffLimits.max_images_per_post}</b> картинок в посте` +
+                (srcs.length ? `, источники: <b>${srcs.map(s => names[s] || s).join(', ')}</b>` : '');
+            document.getElementById('dropMaxFiles').textContent = String(tariffLimits.max_images_per_post);
+            document.getElementById('webSourceNote').classList.toggle('hidden', !(srcs.length && !srcs.includes('user_upload')));
+            document.getElementById('imgSearchQuery').value = (post && post.topic) ? String(post.topic).slice(0, 50) : '';
+            document.getElementById('searchResultsGrid').innerHTML = '';
+
+            renderSelectedImages();
+            const modal = document.getElementById('imagesModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+
+        function hideImagesModal() {
+            const modal = document.getElementById('imagesModal');
+            modal.classList.remove('flex');
+            modal.classList.add('hidden');
+            currentImagesPostId = null;
+            selectedPostImages = [];
+        }
+
+        function renderSelectedImages() {
+            const grid = document.getElementById('selectedImagesGrid');
+            document.getElementById('selectedImgCount').textContent = selectedPostImages.length;
+            if (!selectedPostImages.length) {
+                grid.innerHTML = '<div class="text-sm text-gray-400">Пока пусто — загрузите файлы или выберите картинку из поиска</div>';
+                return;
+            }
+            const labels = { ai: '🤖 ИИ', web_search: '🔎 Поиск', user_upload: '📤 Загрузка' };
+            grid.innerHTML = selectedPostImages.map((img, idx) => `
+                <div class="relative">
+                    <img src="${escapeHtml(img.url)}" alt="Выбранное изображение ${idx + 1}" loading="lazy"
+                         onerror="this.parentNode.outerHTML='<div class=&quot;text-xs text-red-500&quot;>⚠ Файл не найден</div>'">
+                    <button onclick="removeSelectedImage(${idx})" title="Убрать"
+                            class="absolute top-1 right-1 bg-red-600 text-white rounded-full w-6 h-6 text-xs leading-none hover:bg-red-700">&times;</button>
+                    <div class="text-xs text-gray-500 mt-1">${idx + 1}. ${labels[img.source] || escapeHtml(img.source || '')}</div>
+                </div>
+            `).join('');
+            // Стилизация миниатюр выбранных картинок — как в галерее превью.
+            grid.querySelectorAll('img').forEach(el => {
+                el.style.width = '100%'; el.style.height = '8rem';
+                el.style.objectFit = 'cover'; el.style.borderRadius = '.375rem';
+                el.style.border = '1px solid #d1d5db';
+            });
+        }
+
+        function removeSelectedImage(idx) {
+            selectedPostImages.splice(idx, 1);
+            renderSelectedImages();
+        }
+
+        // Добавление картинки с проверкой лимита тарифа и разрешённых источников.
+        function addSelectedImage(url, source) {
+            if (!url) return;
+            if (!tariffLimits.allows_images) { showToast('Картинки запрещены тарифом', true); return; }
+            const allowed = tariffLimits.allowed_image_sources || [];
+            if (allowed.length && !allowed.includes(source)) {
+                showToast(`Источник «${source}» недоступен на вашем тарифе`, true);
+                return;
+            }
+            if (selectedPostImages.some(i => i.url === url)) {
+                showToast('Эта картинка уже добавлена');
+                return;
+            }
+            if (selectedPostImages.length >= tariffLimits.max_images_per_post) {
+                showToast(`Достигнут лимит тарифа: ${tariffLimits.max_images_per_post} картинок в посте`, true);
+                return;
+            }
+            selectedPostImages.push({ url, source });
+            renderSelectedImages();
+        }
+
+        // --- Drag & Drop + input type=file multiple ---
+        async function uploadImageFiles(files) {
+            const list = Array.from(files || []).filter(f => f.type && f.type.startsWith('image/'));
+            if (!list.length) { showToast('Выберите файлы изображений', true); return; }
+            const progress = document.getElementById('uploadProgress');
+            progress.classList.remove('hidden');
+            progress.classList.add('flex');
+            try {
+                for (const file of list) {
+                    if (selectedPostImages.length >= tariffLimits.max_images_per_post) {
+                        showToast(`Лимит тарифа (${tariffLimits.max_images_per_post}) исчерпан — часть файлов пропущена`, true);
+                        break;
+                    }
+                    const fd = new FormData();
+                    fd.append('file', file);
+                    const resp = await fetch(`${API_BASE}/api/upload-image`, { method: 'POST', body: fd });
+                    if (!resp.ok) {
+                        const err = await resp.json().catch(() => ({}));
+                        showToast(`Загрузка «${file.name}» не удалась: ${err.detail || resp.status}`, true);
+                        continue;
+                    }
+                    const data = await resp.json();
+                    addSelectedImage(data.url, 'user_upload');
+                }
+            } finally {
+                progress.classList.add('hidden');
+                progress.classList.remove('flex');
+            }
+        }
+
+        // --- Поиск картинок в интернете ---
+        async function searchImagesForPost() {
+            const query = document.getElementById('imgSearchQuery').value.trim();
+            if (!query) { showToast('Введите ключевое слово для поиска', true); return; }
+            const btn = document.getElementById('imgSearchBtn');
+            const grid = document.getElementById('searchResultsGrid');
+            btn.disabled = true;
+            grid.innerHTML = '<div class="text-sm text-gray-400 col-span-full">Ищем…</div>';
+            try {
+                const limit = Math.min(12, Math.max(4, tariffLimits.max_images_per_post * 4));
+                const resp = await fetch(`${API_BASE}/api/search-images?query=${encodeURIComponent(query)}&limit=${limit}`);
+                if (!resp.ok) throw new Error(await resp.text());
+                const data = await resp.json();
+                const results = data.results || [];
+                if (!results.length) {
+                    grid.innerHTML = '<div class="text-sm text-gray-400 col-span-full">Ничего не найдено</div>';
+                    return;
+                }
+                grid.innerHTML = results.map((url, i) => `
+                    <div class="cursor-pointer group" onclick="addSelectedImage('${url.replace(/'/g, "\\'")}', 'web_search')" title="Нажмите, чтобы добавить в пост">
+                        <img src="${escapeHtml(url)}" alt="Результат поиска ${i + 1}" loading="lazy"
+                             onerror="this.parentNode.style.display='none'"
+                             style="width:100%;height:5rem;object-fit:cover;border-radius:.375rem;border:1px solid #d1d5db;">
+                        <div class="text-xs text-gray-400 group-hover:text-purple-600 mt-1">＋ добавить</div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                grid.innerHTML = '<div class="text-sm text-red-500 col-span-full">Ошибка поиска картинок</div>';
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // --- Сохранение: PUT /api/posts/{id} (images + обратная совместимость image_url) ---
+        async function savePostImages() {
+            if (currentImagesPostId == null) return;
+            const btn = document.getElementById('saveImagesBtn');
+            btn.disabled = true;
+            try {
+                const body = {
+                    images: selectedPostImages.map(i => ({ url: i.url, source: i.source })),
+                };
+                const resp = await fetch(`${API_BASE}/api/posts/${currentImagesPostId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                const data = await resp.json().catch(() => ({}));
+                if (!resp.ok) {
+                    showToast(`Не удалось сохранить: ${data.detail || resp.status}`, true);
+                    return;
+                }
+                showToast('Изображения поста сохранены ✅');
+                hideImagesModal();
+                await loadPosts();  // обновляем таблицу и кэш lastLoadedPosts
+            } catch (e) {
+                showToast('Ошибка сети при сохранении изображений', true);
+            } finally {
+                btn.disabled = false;
+            }
         }
 
         function updateStats(posts) {
@@ -715,11 +964,36 @@
 
         // FIX (UI): закрытие модалки превью по Escape и клику на затемнённый фон
         document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') hidePostPreview();
+            if (e.key === 'Escape') { hidePostPreview(); hideImagesModal(); }
         });
         document.getElementById('postPreviewModal')?.addEventListener('click', function(e) {
             if (e.target === this) hidePostPreview();
         });
+        // FIX (UI, задание 3): закрытие модалки картинок по фону + drag&drop и input file.
+        document.getElementById('imagesModal')?.addEventListener('click', function(e) {
+            if (e.target === this) hideImagesModal();
+        });
+        (function initImageUploadZone() {
+            const dropZone = document.getElementById('dropZone');
+            const fileInput = document.getElementById('imageFileInput');
+            if (!dropZone || !fileInput) return;
+            dropZone.addEventListener('click', () => fileInput.click());
+            fileInput.addEventListener('change', () => {
+                uploadImageFiles(fileInput.files);
+                fileInput.value = '';  // можно выбрать те же файлы повторно
+            });
+            ['dragenter', 'dragover'].forEach(ev => dropZone.addEventListener(ev, e => {
+                e.preventDefault(); e.stopPropagation();
+                dropZone.classList.add('border-blue-400');
+            }));
+            ['dragleave', 'drop'].forEach(ev => dropZone.addEventListener(ev, e => {
+                e.preventDefault(); e.stopPropagation();
+                dropZone.classList.remove('border-blue-400');
+            }));
+            dropZone.addEventListener('drop', e => {
+                if (e.dataTransfer && e.dataTransfer.files) uploadImageFiles(e.dataTransfer.files);
+            });
+        })();
 
         // FIX (UX): восстановление статуса активной генерации после перезагрузки
         // страницы/открытия в новой вкладке. Без этого task_id терялся, и пользователь
