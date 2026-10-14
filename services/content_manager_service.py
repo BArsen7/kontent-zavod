@@ -535,6 +535,44 @@ def generate_content_plan_from_chat(
                 "description": f"Описание для поста типа {ptype}"
             })
     
+    # Гибридная картинка (тарификация): план генерируется синхронно из
+    # threadpool-роута FastAPI, поэтому сетевые вызовы поиска здесь допустимы.
+    # Если у пользователя нет тарифа или тариф не разрешает картинки —
+    # посты остаются без изображений (обратная совместимость сохранена).
+    tariff_plan = None
+    try:
+        from models import User
+        from services.tariff_service import get_user_tariff
+
+        plan_user = db.query(User).filter(User.id == period.user_id).first()
+        if plan_user is not None:
+            tariff_plan = get_user_tariff(db, plan_user)
+    except Exception as e:  # noqa: BLE001 — диагностика тарифа не должна ломать план
+        logger.warning("Не удалось определить тариф пользователя: %s", e)
+
+    web_search_enabled = False
+    max_imgs = 0
+    allowed_sources = set()
+    if tariff_plan is not None and getattr(tariff_plan, "allows_images", False):
+        max_imgs = int(tariff_plan.max_images_per_post or 0)
+        from services.tariff_service import parse_allowed_sources
+
+        allowed_sources = set(parse_allowed_sources(tariff_plan))
+        if gen_ctx is not None and gen_ctx.image_source_preferences:
+            try:
+                prefs = {str(s) for s in json.loads(gen_ctx.image_source_preferences)}
+                if prefs:
+                    allowed_sources &= prefs  # предпочтения сообщества сужают разрешения
+            except (ValueError, TypeError):
+                pass
+        web_search_enabled = bool(max_imgs > 0 and "web_search" in allowed_sources)
+
+    search_query = ""
+    if community is not None:
+        search_query = (community.group_name or "").strip()
+    if not search_query:
+        search_query = (period.community_info or "").strip() or "контент для сообщества"
+
     # Создаём посты в БД
     created_posts = []
     now = datetime.now()
@@ -552,14 +590,36 @@ def generate_content_plan_from_chat(
             status="draft",
             publish_at=now + timedelta(hours=i*3)  # Распределяем посты по времени
         )
-        
+
         db.add(post)
+        db.flush()  # получаем post.id до commit
+
+        # Гибридное назначение картинок согласно тарифу (user_upload -> ai ->
+        # web_search). Для черновиков плана доступны web_search и user_upload;
+        # ИИ-генерация остаётся за явным эндпоинтом /api/generate.
+        if web_search_enabled:
+            try:
+                from services.tariff_service import assign_images_to_post
+
+                assign_images_to_post(
+                    db,
+                    post,
+                    tariff_plan,
+                    topic=post.topic or search_query,
+                    replace_existing=False,
+                )
+            except Exception as e:  # noqa: BLE001 — без картинки лучше, чем без плана
+                logger.warning(
+                    "Пост %s: гибридное назначение картинок не удалось: %s",
+                    post.id, e,
+                )
+
         created_posts.append({
             "id": post.id,
             "type": post.post_type,
             "topic": post.topic
         })
-    
+
     # Обновляем статус периода
     period.status = "active"
     period.updated_at = now
