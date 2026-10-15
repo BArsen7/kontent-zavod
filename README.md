@@ -16,6 +16,9 @@
 - 👥 **Управление несколькими сообществами VK** — добавление сообществ с проверкой прав администратора, динамическая регистрация токенов
 - 🤖 **Генерация текста** через локальные LLM (Ollama: Qwen2.5) или облачный API **GigaChat Premium** (`GigaChat-Pro` / `GigaChat-Max`) — провайдер выбирается в админке без перезапуска
 - 🎨 **Создание изображений** через Kandinsky / GigaChat Image API (облачно или локально через Ollama; ответы `url` и `b64_json` сохраняются в `static/uploads/`)
+- 💎 **Тарифные планы** — гибкие лимиты, настраиваемые админом: дальность контент-плана (дни), рубрики, посты день/неделя/месяц, количество сообществ, разрешение и источники картинок (`ai` / `web_search` / `user_upload`); проверка лимитов перед генерацией (403 при превышении)
+- 🖼 **Мультиизображения постов** — несколько картинок на пост (`PostImage`, порядок `order_index`): загрузка своих файлов (`/api/upload-image` → `data/media/`), поиск картинок в интернете (SerpApi Google Images или mock-режим picsum.photos без ключа), гибридная автоподстановка по тарифу (`assign_images_to_post`) и полное превью поста с галереей в веб-интерфейсе
+- 🧩 **Контекст генерации сообщества** — анкета «Цель / Специфика / ЦА / Что уже работает / Предпочтения по картинкам» (`CommunityGenerationContext`): пока контекст не настроен, ИИ-менеджер задаёт структурированные вопросы; после настройки данные подставляются в системный промпт в блоке `<CONTEXT>...</CONTEXT>`
 - 🧑‍💼 **Персональный ИИ-контент-менеджер** — чат с нейросетью, который задаёт уточняющие вопросы и генерирует контент-план на неделю / 2 недели / месяц (подробнее в [CONTENT_MANAGER_README.md](CONTENT_MANAGER_README.md))
 - ⏰ **Фоновый планировщик** (APScheduler) для автоматической публикации одобренных постов каждые 30 минут
 - 📊 **Веб-интерфейс** (Jinja2 + локальный CSS без CDN): главная страница со списком постов, страница контент-менеджера, страница входа/регистрации
@@ -199,6 +202,7 @@ nano .env
 | `VK_GROUP_ID` | для планировщика | ID группы VK (число) | `123456789` |
 | `TG_BOT_TOKEN` | нет | Зарезервировано под будущего Telegram-бота | — |
 | `TG_PROXY_URL` | нет | Прокси (зарезервировано) | — |
+| `SERPAPI_KEY` | нет | Ключ SerpApi для реального поиска картинок в Google Images (`GET /api/search-images`). Без ключа включается mock-режим (picsum.photos) | `8f2a...` |
 | `LOG_LEVEL` | нет (дефолт `INFO`) | Уровень логирования | `INFO` |
 
 Пример заполненного `.env`:
@@ -225,6 +229,9 @@ VK_GROUP_ID=123456789
 # Telegram settings (reserved for future use)
 TG_BOT_TOKEN=
 TG_PROXY_URL=
+
+# Image web search (SerpApi Google Images; без ключа — mock-режим picsum.photos)
+SERPAPI_KEY=
 
 # Logging
 LOG_LEVEL=INFO
@@ -277,7 +284,24 @@ python scripts/setup_db.py --with-test-data
 python scripts/setup_db.py --drop-existing
 ```
 
-Создаваемые таблицы: `users`, `sessions`, `user_communities`, `platform_accounts`, `content_plans`, `posts`, `post_stats`, `content_plan_periods`, `chat_messages`.
+Создаваемые таблицы: `users`, `sessions`, `user_communities`, `platform_accounts`, `content_plans`, `posts`, `post_stats`, `content_plan_periods`, `chat_messages`, **`tariff_plans`**, **`community_generation_contexts`**, **`post_images`**.
+
+#### ⚠️ Миграция на новую схему (тарифы, контексты, мультиизображения)
+
+SQLAlchemy `create_all` создаёт только **отсутствующие таблицы** и никогда не добавляет колонки в уже существующие. Поэтому:
+
+- **Боевая БД (данные терять нельзя):** достаточно просто запустить приложение или `python scripts/setup_db.py` — `database.py` автоматически:
+  1. создаст новые таблицы `tariff_plans`, `community_generation_contexts`, `post_images`;
+  2. выполнит `ALTER TABLE users ADD COLUMN tariff_plan_id` (если колонки ещё нет);
+  3. создаст базовые тарифные планы «Бесплатный» и «Про» (если таблица тарифов пуста).
+- **Тестовая/демо-БД (чистая инициализация с нуля):**
+  ```bash
+  rm data/autopilot.db && python scripts/setup_db.py
+  # или одной командой:
+  python scripts/setup_db.py --drop-existing
+  ```
+
+После миграции админ может настроить тарифы на странице **«Админка → 💎 Тарифы»** (`/admin/tariffs-page`) и назначить план пользователю; без назначенного тарифа лимиты не применяются (генерация работает как раньше).
 
 ### Шаг 8: Запуск веб-интерфейса и API
 
