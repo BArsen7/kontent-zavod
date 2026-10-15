@@ -1272,6 +1272,28 @@ def get_posts(
     return serialized
 
 
+def _check_post_ownership(db: Session, user: User, post_id: int) -> None:
+    """Проверяет, что пост принадлежит пользователю (или он админ).
+
+    Наследие: часть старых эндпоинтов (/approve, /publish/vk) не проверяла
+    владельца. Правило такое же, как в GET /api/posts: пользователь видит свои
+    посты (через период) и опубликованные; админ — любые.
+    """
+    if getattr(user, "is_admin", False):
+        return
+    post = db.query(Post).filter(Post.id == post_id).first()
+    if post is None:
+        raise HTTPException(status_code=404, detail="Пост не найден")
+    period = None
+    if post.content_plan_period_id is not None:
+        period = db.query(ContentPlanPeriod).filter(
+            ContentPlanPeriod.id == post.content_plan_period_id
+        ).first()
+    owns_period = period is not None and period.user_id == user.id
+    if not (owns_period or post.status == "published"):
+        raise HTTPException(status_code=403, detail="Пост принадлежит другому пользователю")
+
+
 def _serialize_post(post: Post) -> Dict[str, Any]:
     """Сериализует пост для API, включая вложенный список изображений (PostImage).
 
@@ -1550,8 +1572,16 @@ def delete_post(  # FIX: Event loop unblocked — синхронный роут 
 
 @app.post("/api/posts/{post_id}/approve")
 def approve_post(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
-    post_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    """Меняет статус поста на 'approved'."""
+    post_id: int,
+    request: Request,
+    db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Меняет статус поста на 'approved'.
+
+    FIX (безопасность): эндпоинт защищён require_auth + проверкой владельца —
+    раньше любой гость мог одобрять чужие посты.
+    """
+    user = require_auth(request, db)
+    _check_post_ownership(db, user, post_id)
     post = db.query(Post).filter(Post.id == post_id).first()
     
     if not post:
@@ -1579,6 +1609,7 @@ def approve_post(  # FIX: Event loop unblocked — синхронный роут
 @app.post("/api/publish/vk/{post_id}")
 def publish_vk(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     post_id: int,
+    request: Request,
     group_id: int | None = None,
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
@@ -1586,7 +1617,11 @@ def publish_vk(  # FIX: Event loop unblocked — синхронный роут �
     Публикует пост ВКонтакте через CommunityManager.
     Если group_id не указан, публикует в первое доступное сообщество.
     Меняет статус на 'published' при успехе.
+
+    FIX (безопасность): require_auth + проверка владельца поста.
     """
+    user = require_auth(request, db)
+    _check_post_ownership(db, user, post_id)
     post = db.query(Post).filter(Post.id == post_id).first()
     
     if not post:
