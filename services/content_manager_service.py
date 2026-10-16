@@ -9,6 +9,9 @@ from models import (
     CommunityGenerationContext,
     ContentPlanPeriod,
     ChatMessage,
+    HistoricalPost,
+    MarketingStrategy,
+    PlatformAccount,
     Post,
     UserCommunity,
 )
@@ -16,12 +19,56 @@ from generators.text_generator import generate_text
 
 logger = logging.getLogger(__name__)
 
-# Строгий структурированный вопрос, который ИИ обязан задать первым,
-# пока сообщество не настроено (CommunityGenerationContext.is_configured == False).
+# Строгий структурированный вопрос (все 5 обязательных пунктов), который
+# ИИ обязан задать, пока сообщество не настроено
+# (CommunityGenerationContext.is_configured == False). Используется в
+# generate_content_plan_from_chat как гейт перед генерацией плана; в чате
+# вопросы выдаются небольшими диалоговыми блоками CONTEXT_SETUP_BLOCK_*.
 CONTEXT_SETUP_QUESTION = (
     "Для настройки генерации ответьте: "
     "1) Цель, 2) Специфика, 3) ЦА, 4) Что уже работает, "
     "5) Предпочтения по картинкам (ИИ/Поиск/Загрузка)"
+)
+
+# Количество исторических постов, попадающих в блок <ANALYTICS>.
+TOP_POSTS_FOR_ANALYTICS: int = 3
+
+# Максимальная длина фрагмента текста поста в аналитическом блоке.
+MAX_ANALYTICS_SNIPPET_CHARS: int = 90
+
+
+def _split_context_questions(parts: List[str]) -> str:
+    """Собирает вопросы анкеты небольшими диалоговыми блоками (по 2 вопроса).
+
+    Вместо одного огромного списка из 5 вопросов пользователь получает
+    короткое дружелюбное сообщение — так первый диалог выглядит как
+    настоящий чат, а не как анкета.
+    """
+    header = (
+        "Здравствуйте! Я ваш персональный контент-менеджер. "
+        "Чтобы план получился точным, отвечьте, пожалуйста, на пару вопросов:"
+    )
+    lines = [header, ""]
+    for i, part in enumerate(parts, start=1):
+        lines.append(f"{i}) {part}")
+    return "\n".join(lines)
+
+
+# Блок A (вопросы 1-2), блок B (вопросы 3-4), блок C (вопрос 5) —
+# суммарно это те же 5 обязательных пунктов CONTEXT_SETUP_QUESTIONS.
+CONTEXT_SETUP_BLOCK_A = _split_context_questions(
+    ["Какая цель сообщества? (продажи, вовлечение, узнаваемость)",
+     "В чём специфика вашего сообщества? (тематика, форматы)"]
+)
+CONTEXT_SETUP_BLOCK_B = (
+    "Отлично! Теперь ещё два вопроса:\n"
+    "3) Кто ваша целевая аудитория? (возраст, интересы)\n"
+    "4) Что у вас уже есть и что лучше всего работает?"
+)
+CONTEXT_SETUP_BLOCK_C = (
+    "И последний вопрос:\n"
+    "5) Предпочтения по картинкам в постах — ИИ / Поиск / Загрузка? "
+    "(можно выбрать несколько)"
 )
 
 
@@ -61,6 +108,121 @@ def _period_user_community(db: Session, period: ContentPlanPeriod) -> Optional[U
     ).order_by(UserCommunity.id.asc()).first()
 
 
+def get_configured_generation_context(
+    db: Session, user_community_id: int
+) -> Optional[CommunityGenerationContext]:
+    """Возвращает CommunityGenerationContext, только если он реально настроен.
+
+    Проверяет наличие записи с is_configured == True и непустыми ключевыми
+    полями (хотя бы цель или ЦА). Иначе — None.
+    """
+    ctx = db.query(CommunityGenerationContext).filter(
+        CommunityGenerationContext.user_community_id == user_community_id
+    ).first()
+    if ctx is None or not ctx.is_configured:
+        return None
+    if not ((ctx.goal or "").strip() or (ctx.target_audience or "").strip()):
+        return None
+    return ctx
+
+
+def _top_historical_posts(db: Session, group_id: int) -> List[HistoricalPost]:
+    """Топ-N исторических постов VK-сообщества по вовлечённости (ER).
+
+    HistoricalPost.community_id ссылается на PlatformAccount.id, а связь
+    с конкретным сообществом пользователя идёт через account_id (VK group_id).
+    Сначала берём посты с флагом is_top_performer, при их отсутствии —
+    просто топ по engagement_rate.
+    """
+    account_ids = [
+        aid
+        for (aid,) in db.query(PlatformAccount.id).filter(
+            PlatformAccount.account_id == group_id
+        ).all()
+    ]
+    if not account_ids:
+        return []
+
+    query = db.query(HistoricalPost).filter(HistoricalPost.community_id.in_(account_ids))
+    top_flagged = (
+        query.filter(HistoricalPost.is_top_performer.is_(True))
+        .order_by(HistoricalPost.engagement_rate.desc())
+        .limit(TOP_POSTS_FOR_ANALYTICS)
+        .all()
+    )
+    if top_flagged:
+        return top_flagged
+    return query.order_by(HistoricalPost.engagement_rate.desc()).limit(TOP_POSTS_FOR_ANALYTICS).all()
+
+
+def _post_topic_snippet(post: HistoricalPost) -> str:
+    """Короткая «тема» поста — первые строки текста для блока ANALYTICS."""
+    text = (post.text or "").strip().replace("\n", " ")
+    if not text:
+        return f"пост #{post.vk_post_id}"
+    if len(text) > MAX_ANALYTICS_SNIPPET_CHARS:
+        text = text[:MAX_ANALYTICS_SNIPPET_CHARS].rstrip() + "…"
+    return text
+
+
+def build_analytics_block(db: Session, period: ContentPlanPeriod) -> str:
+    """Формирует блок <ANALYTICS>...</ANALYTICS> из анкеты и исторической статистики.
+
+    Содержит: лучшие посты (темы + ER) из HistoricalPost, ЦА и цель из
+    CommunityGenerationContext, а также рубрики из MarketingStrategy, если
+    стратегия сообщества уже генерировалась.
+
+    Возвращает пустую строку, если и настроенной анкеты, и исторических
+    данных нет — тогда контент-менеджер должен задавать вопросы.
+    """
+    community = _period_user_community(db, period)
+    if community is None:
+        return ""
+
+    ctx = get_configured_generation_context(db, community.id)
+    top_posts = _top_historical_posts(db, community.group_id)
+
+    if ctx is None and not top_posts:
+        return ""
+
+    lines = ["<ANALYTICS>"]
+
+    if top_posts:
+        posts_desc = "; ".join(
+            f"«{_post_topic_snippet(p)}» (ER={p.engagement_rate:.2f}%)" for p in top_posts
+        )
+        lines.append(f"Лучшие посты: {posts_desc}")
+    else:
+        lines.append("Лучшие посты: историческая статистика отсутствует")
+
+    if ctx is not None:
+        lines.append(f"ЦА: {ctx.target_audience or 'не указана'}")
+        lines.append(f"Цель: {ctx.goal or 'не указана'}")
+        if (ctx.community_specifics or "").strip():
+            lines.append(f"Специфика: {ctx.community_specifics.strip()}")
+        if (ctx.current_state_and_what_works or "").strip():
+            lines.append(f"Что уже работает: {ctx.current_state_and_what_works.strip()}")
+
+        strategy = (
+            db.query(MarketingStrategy)
+            .join(PlatformAccount, MarketingStrategy.community_id == PlatformAccount.id)
+            .filter(PlatformAccount.account_id == community.group_id)
+            .first()
+        )
+        if strategy is not None:
+            rubric_names = [
+                str(r.get("name")) for r in (strategy.rubrics or [])
+                if isinstance(r, dict) and r.get("name")
+            ]
+            if rubric_names:
+                lines.append(f"Рубрики стратегии: {', '.join(rubric_names[:5])}")
+            if (strategy.posting_schedule or "").strip():
+                lines.append(f"График публикаций: {strategy.posting_schedule.strip()}")
+
+    lines.append("</ANALYTICS>")
+    return "\n".join(lines)
+
+
 def build_context_block(db: Session, period: ContentPlanPeriod) -> str:
     """Формирует блок <CONTEXT>...</CONTEXT> из CommunityGenerationContext.
 
@@ -86,16 +248,24 @@ def build_context_block(db: Session, period: ContentPlanPeriod) -> str:
     except (ValueError, TypeError):
         prefs_str = ctx.image_source_preferences or ""
 
-    return (
-        "<CONTEXT>\n"
-        f"Сообщество: {community.group_name or community.group_id}\n"
-        f"Цель: {ctx.goal or 'не указана'}\n"
-        f"Специфика сообщества: {ctx.community_specifics or 'не указана'}\n"
-        f"Целевая аудитория: {ctx.target_audience or 'не указана'}\n"
-        f"Что уже есть и что работает: {ctx.current_state_and_what_works or 'не указано'}\n"
-        f"Предпочтения по источникам картинок: {prefs_str or 'не указаны'}\n"
-        "</CONTEXT>"
-    )
+    parts = [
+        "<CONTEXT>",
+        f"Сообщество: {community.group_name or community.group_id}",
+        f"Цель: {ctx.goal or 'не указана'}",
+        f"Специфика сообщества: {ctx.community_specifics or 'не указана'}",
+        f"Целевая аудитория: {ctx.target_audience or 'не указана'}",
+        f"Что уже есть и что работает: {ctx.current_state_and_what_works or 'не указано'}",
+        f"Предпочтения по источникам картинок: {prefs_str or 'не указаны'}",
+    ]
+
+    # Дополнительно к анкете подмешиваем аналитику лучших постов, чтобы план
+    # опирался на реальные ER-паттерны сообщества.
+    analytics = build_analytics_block(db, period)
+    if analytics:
+        parts.append(analytics)
+
+    parts.append("</CONTEXT>")
+    return "\n".join(parts)
 
 
 def _default_use_local(db: Session) -> bool:
@@ -350,20 +520,66 @@ def generate_ai_response(
 - Информация о сообществе: {period.community_info or 'Не указана'}
 
 История диалога:"""
-    
+
     for msg in chat_history[-10:]:  # Последние 10 сообщений
         role_ru = "Пользователь" if msg.role == "user" else "Ассистент"
         context += f"\n{role_ru}: {msg.content}"
-    
+
     context += f"\n\nПользователь: {user_message}\n\nАссистент:"
-    
+
+    # FIX (игнорирование анкеты и аналитики): если сообщество настроено
+    # (CommunityGenerationContext.is_configured == True) и/или есть
+    # исторические посты — данные внедряются в системный промпт как блоки
+    # <CONTEXT>/<ANALYTICS>, и базовые вопросы больше не задаются.
+    system_prompt = CONTENT_MANAGER_SYSTEM_PROMPT
+    community = _period_user_community(db, period)
+    ctx = (
+        get_configured_generation_context(db, community.id)
+        if community is not None
+        else None
+    )
+    top_posts = _top_historical_posts(db, community.group_id) if community is not None else []
+    analytics_block = build_analytics_block(db, period) if (ctx is not None or top_posts) else ""
+    if analytics_block:
+        system_prompt = (
+            f"{system_prompt}\n\n{analytics_block}\n\n"
+            "Пользователь уже заполнил анкету сообщества, и у тебя есть его "
+            "история постов (см. ANALYTICS). НЕ задавай базовые вопросы (цель, "
+            "специфика, ЦА, что работает, картинки) — опирайся на известные данные."
+        )
+    elif community is not None and ctx is None:
+        # Анкета не заполнена — ведём диалог настройки короткими блоками.
+        gen_ctx_raw = db.query(CommunityGenerationContext).filter(
+            CommunityGenerationContext.user_community_id == community.id
+        ).first()
+        answered = 0
+        if gen_ctx_raw is not None:
+            answered = sum(
+                1 for field in (gen_ctx_raw.goal, gen_ctx_raw.community_specifics,
+                                gen_ctx_raw.target_audience,
+                                gen_ctx_raw.current_state_and_what_works,
+                                gen_ctx_raw.image_source_preferences)
+                if (field or "").strip()
+            )
+        next_question_block = (
+            CONTEXT_SETUP_BLOCK_C if answered >= 4
+            else CONTEXT_SETUP_BLOCK_B if answered >= 2
+            else CONTEXT_SETUP_BLOCK_A
+        )
+        system_prompt = (
+            f"{system_prompt}\n\nАнкета сообщества ещё не заполнена. "
+            "Задавай вопросы настройки небольшими блоками (по 1-2 вопроса), "
+            "а не списком из пяти сразу. Следующий ожидаемый блок вопросов:\n"
+            f"{next_question_block}"
+        )
+
     # Генерируем ответ через ИИ
     try:
         # FIX: провайдер выбирается по системной настройке ai_provider
         # (ollama | cloud | gigachat), а не жёстко Ollama.
         response = generate_text(
             prompt=context,
-            system_prompt=CONTENT_MANAGER_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             use_local=_default_use_local(db),
         )
 
@@ -391,29 +607,120 @@ def initialize_chat_with_questions(
     period_id: int
 ) -> str:
     """
-    Инициализирует чат с первыми вопросами от ИИ-контент-менеджера.
-    
+    Инициализирует чат с первым сообщением от ИИ-контент-менеджера.
+
+    Логика первого ответа:
+    - Если для сообщества пользователя есть настроенная анкета
+      (CommunityGenerationContext.is_configured == True) и/или историческая
+      аналитика постов (HistoricalPost) — базовые вопросы НЕ задаются.
+      Формируется блок <ANALYTICS>...</ANALYTICS>, передаётся в system_prompt
+      generate_text(), и LLM отвечает по образцу: «Я проанализировал ваше
+      сообщество. Вижу, что лучше всего заходят [...]. Учитывая вашу ЦА [...],
+      я уже подготовил черновик плана. Хотите его посмотреть или скорректируем
+      фокус?».
+    - Если данных нет — задаём вопросы анкеты небольшими диалоговыми блоками
+      (по 1-2 вопроса), а не одним огромным списком.
+
     Args:
         db: Сессия базы данных
         period_id: ID периода контент-плана
-        
+
     Returns:
-        str: Приветственное сообщение с вопросами
+        str: Приветственное сообщение (вопросы либо аналитическое приветствие)
     """
-    welcome_message = """Здравствуйте! Я ваш персональный контент-менеджер. 
-Помогу вам создать эффективный контент-план для вашего сообщества.
+    period = db.query(ContentPlanPeriod).filter(
+        ContentPlanPeriod.id == period_id
+    ).first()
 
-Чтобы начать, расскажите немного о вашем проекте:
+    community = _period_user_community(db, period) if period is not None else None
+    ctx = (
+        get_configured_generation_context(db, community.id)
+        if community is not None
+        else None
+    )
 
-1. Какая тематика у вашего сообщества? (например, выпечка, рукоделие, путешествия)
-2. Кто ваша целевая аудитория? (возраст, интересы)
-3. Какие цели вы преследуете? (продажи, вовлечение, узнаваемость)
+    # === ВЕТКА 1: данные ЕСТЬ — аналитическое приветствие без базовых вопросов ===
+    # Требование: аналитика учитывается только вместе с заполненной анкетой
+    # (ctx.is_configured == True); голая история постов без ответов пользователя
+    # не заменяет диалог настройки.
+    if period is not None and ctx is not None:
+        top_posts = _top_historical_posts(db, community.group_id)
+        analytics_block = build_analytics_block(db, period)
+        welcome_message = ""
+        try:
+            system_prompt = (
+                "Ты — персональный контент-менеджер и маркетолог. Отвечай обычным "
+                "текстом без HTML.\n\n"
+                + analytics_block
+                + "\n\nПользователь уже заполнил анкету сообщества, и у тебя есть "
+                "его история постов. НЕ задавай базовые вопросы (цель, специфика, "
+                "ЦА, что работает, картинки) — эти данные тебе известны из блока "
+                "ANALYTICS. Ответь коротко (3-5 предложений) примерно так: \"Я "
+                "проанализировал ваше сообщество. Вижу, что лучше всего заходят "
+                "[тема из ANALYTICS]. Учитывая вашу ЦА ([ЦА из ANALYTICS]), я уже "
+                "подготовил черновик плана. Хотите его посмотреть или скорректируем "
+                "фокус?\" — используй реальные темы и цифры из ANALYTICS."
+            )
+            prompt = (
+                f"Период планирования: {period.period_type} "
+                f"({period.start_date.strftime('%d.%m.%Y')} - "
+                f"{period.end_date.strftime('%d.%m.%Y')}). "
+                "Поздоровайся и предложи посмотреть готовый черновик плана."
+            )
+            raw = generate_text(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                use_local=_default_use_local(db),
+            )
+            welcome_message = _strip_html_from_response(raw or "")
+        except Exception as e:  # noqa: BLE001 — при недоступности LLM не роняем создание периода
+            logger.warning(f"LLM-приветствие с аналитикой не получилось ({e}) — используем шаблон")
 
-Ответьте на эти вопросы, и я предложу вам персональный контент-план!"""
-    
-    add_chat_message(db, period_id, "assistant", welcome_message)
-    
-    return welcome_message
+        if not welcome_message:
+            # Fallback-шаблон, если LLM недоступна.
+            best_topic = _post_topic_snippet(top_posts[0]) if top_posts else "ваши форматы"
+            audience = (ctx.target_audience or "ваша аудитория") if ctx is not None else "ваша аудитория"
+            welcome_message = (
+                f"Здравствуйте! Я проанализировал ваше сообщество. Вижу, что лучше "
+                f"всего заходят: «{best_topic}». Учитывая вашу ЦА ({audience}), "
+                "я уже подготовил черновик плана. Хотите его посмотреть или "
+                "скорректируем фокус?"
+            )
+
+        add_chat_message(db, period_id, "assistant", welcome_message)
+        return welcome_message
+
+    # === ВЕТКА 2: данных НЕТ — задаём вопросы по одному/двумя блоками (диалог) ===
+    # ctx здесь гарантированно None (незаполненная/несуществующая анкета),
+    # поэтому берём «сырую» запись напрямую: она может существовать с
+    # is_configured=False и частичными ответами пользователя.
+    raw_ctx = None
+    if community is not None:
+        raw_ctx = db.query(CommunityGenerationContext).filter(
+            CommunityGenerationContext.user_community_id == community.id
+        ).first()
+
+    if raw_ctx is not None:
+        # Анкета существует, но ещё не подтверждена — пользователь уже начал
+        # диалог настройки: следующий по счёту небольшой блок вопросов.
+        answered = sum(
+            1 for field in (raw_ctx.goal, raw_ctx.community_specifics,
+                            raw_ctx.target_audience,
+                            raw_ctx.current_state_and_what_works,
+                            raw_ctx.image_source_preferences)
+            if (field or "").strip()
+        )
+        if answered >= 4:
+            next_block = CONTEXT_SETUP_BLOCK_C
+        elif answered >= 2:
+            next_block = CONTEXT_SETUP_BLOCK_B
+        else:
+            next_block = CONTEXT_SETUP_BLOCK_A
+    else:
+        next_block = CONTEXT_SETUP_BLOCK_A
+
+    add_chat_message(db, period_id, "assistant", next_block)
+    return next_block
 
 
 def generate_content_plan_from_chat(

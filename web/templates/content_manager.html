@@ -23,6 +23,13 @@
             margin-bottom: 12px;
             word-wrap: break-word;
         }
+        /* FIX (переносы строк): \n из ответов LLM должны отображаться как
+           реальные переносы. textContent + pre-wrap вместо innerHTML+<br>. */
+        .chat-message-bubble {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
         .chat-message.user {
             background-color: #3b82f6;
             color: white;
@@ -154,13 +161,12 @@
                     <!-- Chat Input Area -->
                     <div class="px-6 py-4 border-t border-gray-200">
                         <div class="flex space-x-3">
-                            <input 
-                                type="text" 
+                            <textarea 
                                 id="chatInput" 
-                                placeholder="Введите сообщение..." 
-                                class="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                                onkeypress="if(event.key === 'Enter') sendMessage()"
-                            >
+                                rows="2"
+                                placeholder="Введите сообщение... (Enter — отправить, Shift+Enter — новая строка)" 
+                                class="flex-1 border border-gray-300 rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+                            ></textarea>
                             <button 
                                 onclick="sendMessage()" 
                                 id="sendBtn"
@@ -659,11 +665,8 @@
                     
                     // Display welcome message
                     const chatContainer = document.getElementById('chatMessages');
-                    chatContainer.innerHTML = `
-                        <div class="chat-message assistant">
-                            ${nl2br(result.welcome_message)}
-                        </div>
-                    `;
+                    chatContainer.innerHTML = '';
+                    appendChatMessage('assistant', result.welcome_message);
                 } else {
                     throw new Error(result.detail || 'Ошибка создания периода');
                 }
@@ -687,17 +690,40 @@
             }
         }
 
-        // FIX (баг с видимыми <br> в чате): сообщения модели вставляются через
-        // innerHTML; используем единый escapeHtml (объявлен выше) и переводим
-        // переводы строк в <br> ПОСЛЕ экранирования — так любые теги из ответа
-        // LLM не интерпретируются как разметка и не показываются текстом.
+        // FIX (переносы строк + XSS): текст сообщения вставляется через
+        // textContent (без innerHTML для содержимого), а CSS-класс
+        // .chat-message-bubble (white-space: pre-wrap) рендерит \n из
+        // ответов LLM как реальные переносы строк.
+        function appendChatMessage(role, content) {
+            const container = document.getElementById('chatMessages');
+
+            const wrapper = document.createElement('div');
+            wrapper.className = `chat-message ${role}`;
+
+            const label = document.createElement('div');
+            label.className = 'text-xs opacity-75 mb-1';
+            label.textContent = role === 'user' ? 'Вы' : 'Контент-менеджер';
+
+            const bubble = document.createElement('div');
+            bubble.className = 'chat-message-bubble';
+            bubble.textContent = content ?? '';
+
+            wrapper.appendChild(label);
+            wrapper.appendChild(bubble);
+            container.appendChild(wrapper);
+            container.scrollTop = container.scrollHeight;
+            return wrapper;
+        }
+
+        // nl2br оставлен для обратной совместимости (в чате больше не
+        // используется — достаточно textContent + white-space: pre-wrap).
         function nl2br(text) {
             return escapeHtml(text).replace(/\n/g, '<br>');
         }
 
         function renderChatMessages(messages) {
             const container = document.getElementById('chatMessages');
-            
+
             if (messages.length === 0) {
                 container.innerHTML = `
                     <div class="text-center text-gray-500 mt-20">
@@ -708,15 +734,8 @@
                 return;
             }
 
-            container.innerHTML = messages.map(m => `
-                <div class="chat-message ${m.role}">
-                    <div class="text-xs opacity-75 mb-1">${m.role === 'user' ? 'Вы' : 'Контент-менеджер'}</div>
-                    <div>${nl2br(m.content)}</div>
-                </div>
-            `).join('');
-            
-            // Scroll to bottom
-            container.scrollTop = container.scrollHeight;
+            container.innerHTML = '';
+            messages.forEach(m => appendChatMessage(m.role, m.content));
         }
 
         // Send message
@@ -735,16 +754,9 @@
             sendBtn.disabled = true;
             input.value = '';
 
-            // Add user message to chat
-            const chatContainer = document.getElementById('chatMessages');
-            const userMsgHtml = `
-                <div class="chat-message user">
-                    <div class="text-xs opacity-75 mb-1">Вы</div>
-                    <div>${escapeHtml(message)}</div>
-                </div>
-            `;
-            chatContainer.insertAdjacentHTML('beforeend', userMsgHtml);
-            chatContainer.scrollTop = chatContainer.scrollHeight;
+            // Add user message to chat (textContent + white-space: pre-wrap —
+            // см. appendChatMessage; без innerHTML для содержимого — защита от XSS)
+            appendChatMessage('user', message);
 
             try {
                 const response = await fetch(`${API_BASE}/api/content-manager/chat/${currentPeriodId}/send`, {
@@ -752,19 +764,12 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: message })
                 });
-                
+
                 const result = await response.json();
-                
+
                 if (response.ok && result.success) {
                     // Add AI response
-                    const aiMsgHtml = `
-                        <div class="chat-message assistant">
-                            <div class="text-xs opacity-75 mb-1">Контент-менеджер</div>
-                            <div>${nl2br(result.ai_response)}</div>
-                        </div>
-                    `;
-                    chatContainer.insertAdjacentHTML('beforeend', aiMsgHtml);
-                    chatContainer.scrollTop = chatContainer.scrollHeight;
+                    appendChatMessage('assistant', result.ai_response);
                 } else {
                     throw new Error(result.detail || 'Ошибка отправки сообщения');
                 }
@@ -958,6 +963,19 @@
         document.addEventListener('DOMContentLoaded', () => {
             loadPeriods();
             initContextCommunities();
+
+            // FIX (чат): Enter — отправка, Shift+Enter — перенос строки.
+            // Чат-инпут переведён с <input> на <textarea>, чтобы \n работал.
+            const chatInput = document.getElementById('chatInput');
+            if (chatInput) {
+                chatInput.addEventListener('keydown', function(e) {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault(); // Отменяем стандартный перенос строки
+                        sendMessage();      // Вызываем функцию отправки
+                    }
+                    // Если Shift+Enter, ничего не делаем: браузер сам вставит \n
+                });
+            }
         });
 
         // FIX (UI): закрытие модалок по Escape и клику на затемнённый фон
