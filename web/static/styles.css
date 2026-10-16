@@ -324,3 +324,12 @@ textarea { resize: vertical; }
     word-wrap: break-word;
     overflow-wrap: break-word;
 }
+
+/* FIX (Задача 3): стили страницы входа — баннер причины редиректа и ошибки формы.
+   Классы в стиле Tailwind-утилит, уже используемых шаблонами, но без внешних CDN. */
+.bg-amber-50 { background-color: #fffbeb; }
+.text-amber-800 { color: #92400e; }
+.border-amber-300 { border-color: #fcd34d; }
+.bg-red-50 { background-color: #fef2f2; }
+.text-red-700 { color: #b91c1c; }
+.border-red-300 { border-color: #fca5a5; }

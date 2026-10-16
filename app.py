@@ -9,6 +9,7 @@ import os
 import threading
 import secrets
 import uuid
+from urllib.parse import urlencode  # FIX (Задача 3): query-параметры редиректа на /login
 
 import vk_api
 import bcrypt as _bcrypt
@@ -1079,6 +1080,56 @@ async def admin_settings_test_gigachat_image(
 
 # --- Публичная страница заблокированного аккаунта ---
 
+# FIX (Задача 3): для HTML-страниц (не API) вместо JSON HTTPException(401/403)
+# возвращаем RedirectResponse на /login с сообщением и сохранённым URL.
+# Вспомогательные функции ниже используются только веб-роутами; API-эндпоинты
+# продолжают использовать require_auth/get_current_admin (JSON-ответы).
+
+LOGIN_MESSAGE_UNAUTHORIZED = "Для доступа к контент-менеджеру необходимо войти в систему"
+LOGIN_MESSAGE_ADMIN_ONLY = "Для доступа к этой странице требуются права администратора"
+
+
+def _redirect_to_login(message: str = LOGIN_MESSAGE_UNAUTHORIZED, next_url: Optional[str] = None) -> RedirectResponse:
+    """RedirectResponse на /login с текстовым сообщением и опциональным next.
+
+    Параметры next/message передаются как query string (URL-encoded), чтобы
+    страница входа могла показать причину редиректа и вернуться на исходную
+    страницу после успешного логина.
+    """
+    params = {"msg": message}
+    if next_url:
+        params["next"] = next_url
+    return RedirectResponse(url="/login?" + urlencode(params), status_code=302)
+
+
+def _web_access_guard(
+    request: Request,
+    db: Session,
+    *,
+    admin_only: bool = False,
+    login_message: str = LOGIN_MESSAGE_UNAUTHORIZED,
+) -> Optional[RedirectResponse]:
+    """Проверка доступа для HTML-страниц.
+
+    Возвращает None, если доступ разрешён, иначе RedirectResponse:
+      - не авторизован            -> /login?msg=<login_message>&next=<текущий URL>
+      - заблокирован              -> /account-blocked
+      - деактивирован             -> /login?msg=...&next=...
+      - не админ (admin_only=True) -> /login?msg=<права админа>&next=...
+    """
+    user = get_current_user(request, db)
+    if not user:
+        return _redirect_to_login(login_message, request.url.path)
+    if getattr(user, "is_blocked", False):
+        # Заблокированный пользователь — на страницу с причиной блокировки
+        return RedirectResponse(url="/account-blocked", status_code=302)
+    if not user.is_active:
+        return _redirect_to_login("Аккаунт деактивирован. Обратитесь к администратору.", request.url.path)
+    if admin_only and not getattr(user, "is_admin", False):
+        return _redirect_to_login(LOGIN_MESSAGE_ADMIN_ONLY, request.url.path)
+    return None
+
+
 @app.get("/account-blocked")
 def account_blocked_page(request: Request, db: Session = Depends(get_db)):
     """Рендерит страницу 'Аккаунт заблокирован' с причиной и датой блокировки."""
@@ -1111,7 +1162,14 @@ def index(request: Request, db: Session = Depends(get_db)):
 @app.get("/content-manager")
 def content_manager_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request, db: Session = Depends(get_db)):
-    """Рендерит страницу контент-менеджера."""
+    """Рендерит страницу контент-менеджера.
+
+    FIX (Задача 3): неавторизованных редиректит на /login с сообщением и
+    сохранённым URL (next), заблокированных — на /account-blocked.
+    """
+    redirect = _web_access_guard(request, db)
+    if redirect is not None:
+        return redirect
     user = get_current_user(request, db)
     return templates.TemplateResponse(
         request=request,
@@ -1122,15 +1180,27 @@ def content_manager_page(  # FIX: Event loop unblocked — синхронный 
 
 @app.get("/login")
 def login_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
-    request: Request, db: Session = Depends(get_db)):
-    """Рендерит страницу входа."""
+    request: Request, db: Session = Depends(get_db),
+    msg: Optional[str] = Query(None, max_length=300),      # сообщение о причине редиректа
+    next: Optional[str] = Query(None, max_length=200),     # куда вернуться после входа
+):
+    """Рендерит страницу входа.
+
+    FIX (Задача 3): принимает ?msg=...&next=... — показывает сообщение вида
+    «Для доступа к контент-менеджеру необходимо войти в систему» и сохраняет
+    URL возврата для редиректа после успешного входа/регистрации.
+    """
     user = get_current_user(request, db)
     if user:
         return RedirectResponse(url="/", status_code=302)
+    # Безопасность: next принимаем только как относительный путь этого сайта
+    next_url = None
+    if next and next.startswith("/") and not next.startswith("//"):
+        next_url = next
     return templates.TemplateResponse(
         request=request,
         name="login.html",
-        context={}
+        context={"message": msg or "", "next_url": next_url or "/"}
     )
 
 
@@ -1139,6 +1209,7 @@ def login(  # FIX: Event loop unblocked — синхронный роут вып
     request: Request,
     email: str = Form(...),
     password: str = Form(...),
+    next_url: str = Form("/"),  # FIX (Задача 3): куда вернуться после входа
     db: Session = Depends(get_db)
 ):
     """Обрабатывает вход пользователя по email и паролю."""
@@ -1146,6 +1217,11 @@ def login(  # FIX: Event loop unblocked — синхронный роут вып
     
     if not user or not verify_password(password, user.password_hash):
         raise HTTPException(status_code=401, detail="Неверный email или пароль")
+
+    if getattr(user, "is_blocked", False):
+        # FIX (Задача 3): заблокированный аккаунт — редирект на страницу с причиной блокировки
+        session_id = create_session(user, db)
+        return authenticated_redirect(RedirectResponse(url="/account-blocked", status_code=302), session_id)
     
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Аккаунт деактивирован")
@@ -1157,8 +1233,10 @@ def login(  # FIX: Event loop unblocked — синхронный роут вып
 
     logger.info(f"Пользователь {user.email} выполнил вход")
 
-    # Перенаправляем на главную страницу
-    return authenticated_redirect(RedirectResponse(url="/", status_code=302), session_id)
+    # FIX (Задача 3): возвращаем на исходную страницу (next), иначе на главную.
+    # Принимается только относительный путь этого сайта (защита от open redirect).
+    target = next_url if (next_url.startswith("/") and not next_url.startswith("//")) else "/"
+    return authenticated_redirect(RedirectResponse(url=target, status_code=302), session_id)
 
 
 @app.post("/auth/register")
