@@ -313,3 +313,14 @@ textarea { resize: vertical; }
     .lg\:col-span-2 { grid-column: span 2 / span 2; }
     .md\:col-span-2 { grid-column: span 2 / span 2; }
 }
+
+/* ---------- Chat message bubbles ----------
+   white-space: pre-wrap — критично для корректного отображения переносов
+   строк (\n), которые возвращает LLM: они рендерятся как реальные переносы,
+   а не сливаются в сплошной поток. Используется вместе с textContent/
+   escapeHtml в JS (защита от XSS). */
+.chat-message-bubble {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
