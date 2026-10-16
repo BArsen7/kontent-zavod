@@ -485,6 +485,22 @@ class SetTariffPayload(BaseModel):
     tariff_plan_id: Optional[int] = None
 
 
+class BulkSetTariffPayload(BaseModel):
+    user_ids: List[int]
+    tariff_plan_id: Optional[int] = None
+
+
+def _validate_tariff_plan_exists(db: Session, tariff_plan_id: int) -> TariffPlan:
+    """Проверяет, что тариф существует (защита от подмены ID). 400 с понятным сообщением."""
+    valid_ids = {p.id for p in db.query(TariffPlan.id).all()}
+    if tariff_plan_id not in valid_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Тарифный план id={tariff_plan_id} не найден. Выберите тариф из существующих.",
+        )
+    return db.query(TariffPlan).filter(TariffPlan.id == tariff_plan_id).first()
+
+
 @app.post("/admin/users/{user_id}/set-tariff")
 def admin_set_user_tariff(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     user_id: int,
@@ -500,23 +516,64 @@ def admin_set_user_tariff(  # FIX: Event loop unblocked — синхронный
 
     plan_name = None
     if payload.tariff_plan_id is not None:
-        plan = db.query(TariffPlan).filter(TariffPlan.id == payload.tariff_plan_id).first()
-        if plan is None:
-            raise HTTPException(status_code=404, detail="Тарифный план не найден")
+        plan = _validate_tariff_plan_exists(db, payload.tariff_plan_id)
         target_user.tariff_plan_id = plan.id
         plan_name = plan.name
     else:
         target_user.tariff_plan_id = None
 
     db.commit()
+    if target_user.id == admin.id:
+        # Назначение тарифа самому себе допустимо, но обязательно логируется.
+        logger.warning(
+            f"[admin] {admin.email} изменил тариф ПОЛЬЗОВАТЕЛЮ-АДМИНИСТРАТОРУ {target_user.email} "
+            f"на {plan_name or 'без тарифа'} (изменение собственного тарифа)"
+        )
     logger.info(
-        f"[admin] {admin.email}: пользователь id={user_id} ({target_user.email}) — "
-        f"тариф: {plan_name or 'снят'}"
+        f"[admin] {admin.email} изменил тариф пользователя {target_user.email} "
+        f"на {plan_name or 'без тарифа'}"
     )
     return {
         "success": True,
         "user_id": user_id,
         "tariff_plan_id": target_user.tariff_plan_id,
+        "tariff_name": plan_name,
+    }
+
+
+@app.post("/admin/users/set-tariff-bulk")
+def admin_set_tariff_bulk(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    payload: BulkSetTariffPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+) -> Dict[str, Any]:
+    """Массовое назначение тарифа выбранным пользователям (bonus-функция админки)."""
+    if not payload.user_ids:
+        raise HTTPException(status_code=400, detail="Не выбран ни один пользователь")
+
+    plan_name = None
+    if payload.tariff_plan_id is not None:
+        plan = _validate_tariff_plan_exists(db, payload.tariff_plan_id)
+        plan_name = plan.name
+
+    targets = db.query(User).filter(User.id.in_(payload.user_ids)).all()
+    if not targets:
+        raise HTTPException(status_code=404, detail="Пользователи не найдены")
+
+    for u in targets:
+        u.tariff_plan_id = payload.tariff_plan_id
+    db.commit()
+
+    emails = ", ".join(u.email for u in targets)
+    logger.info(
+        f"[admin] {admin.email} массово изменил тариф {len(targets)} пользователю ({emails}) "
+        f"на {plan_name or 'без тарифа'}"
+    )
+    return {
+        "success": True,
+        "updated_count": len(targets),
+        "tariff_plan_id": payload.tariff_plan_id,
         "tariff_name": plan_name,
     }
 

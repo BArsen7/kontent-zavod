@@ -51,10 +51,28 @@
     </form>
 </div>
 
+<!-- Панель массовых действий (bonus): чекбоксы в таблице + назначение тарифа выбранным -->
+<div id="bulkBar" class="bulk-bar hidden">
+    <span class="text-sm font-semibold text-gray-700">Выбрано: <span id="bulkCount">0</span></span>
+    <select id="bulkTariffSelect" class="border border-gray-300 rounded-md px-3 py-1.5 text-sm bg-white"></select>
+    <button type="button" id="bulkApplyBtn"
+            class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-1.5 px-4 rounded-md transition duration-200">
+        💎 Назначить тариф выбранным
+    </button>
+    <button type="button" id="bulkClearBtn"
+            class="bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold py-1.5 px-4 rounded-md transition duration-200">
+        Снять выделение
+    </button>
+</div>
+
 <div class="bg-white rounded-lg shadow overflow-x-auto">
-    <table class="min-w-full divide-y divide-gray-200">
+    <table class="min-w-full divide-y divide-gray-200" id="usersTable">
         <thead class="bg-gray-50">
             <tr>
+                <th class="px-3 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    <input type="checkbox" id="checkAllUsers" title="Выбрать всех"
+                           class="w-4 h-4 cursor-pointer align-middle">
+                </th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
@@ -67,7 +85,11 @@
         </thead>
         <tbody class="bg-white divide-y divide-gray-200">
             {% for user in users %}
-            <tr class="hover:bg-gray-50 transition duration-150">
+            <tr class="hover:bg-gray-50 transition duration-150" data-row-user-id="{{ user.id }}">
+                <td class="px-3 py-4 whitespace-nowrap">
+                    <input type="checkbox" class="user-check w-4 h-4 cursor-pointer align-middle"
+                           data-user-id="{{ user.id }}" data-user-email="{{ user.email }}">
+                </td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ user.id }}</td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-800">{{ user.email }}</td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{{ user.first_name or "—" }}</td>
@@ -75,11 +97,11 @@
                 <td class="px-6 py-4 whitespace-nowrap">
                     <div class="tariff-cell relative" data-user-id="{{ user.id }}" data-user-email="{{ user.email }}">
                         {% if user.tariff_name %}
-                            <button type="button"
+                            <button type="button" data-tariff-id="{{ user.tariff_plan_id }}"
                                     class="tariff-badge {% if user.tariff_cost and user.tariff_cost >= 500 %}tariff-premium{% else %}tariff-basic{% endif %}"
                                     title="Кликните, чтобы изменить тариф">{{ user.tariff_name }} 💎 · {{ "%.0f"|format(user.tariff_cost) }} ₽/мес</button>
                         {% else %}
-                            <button type="button" class="tariff-badge tariff-none"
+                            <button type="button" class="tariff-badge tariff-none" data-tariff-id="none"
                                     title="Кликните, чтобы назначить тариф">⚠️ Не назначен</button>
                         {% endif %}
                     </div>
@@ -156,78 +178,180 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="8" class="px-6 py-8 text-center text-sm text-gray-500">Пользователей нет.</td>
+                <td colspan="9" class="px-6 py-8 text-center text-sm text-gray-500">Пользователей нет.</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
 
-<!-- Dropdown для выбора тарифа (один на страницу, позиционируется у ячейки) -->
-<div id="tariffDropdown" class="tariff-dropdown hidden">
-    <div class="text-xs font-semibold text-gray-500 px-3 py-2 border-b border-gray-100"
-         id="tariffDropdownTitle">Выберите тариф</div>
-    <div id="tariffDropdownItems"></div>
+<!-- Модальное окно выбора тарифа (открывается кликом по колонке "Тарифный план") -->
+<div id="setTariffModal" class="modal-overlay hidden">
+    <div class="modal-card max-w-lg w-full bg-white rounded-xl shadow-2xl p-6">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-lg font-bold text-gray-800">💎 Тарифный план</h2>
+            <button type="button" id="tariffModalClose"
+                    class="text-gray-400 hover:text-gray-700 text-2xl leading-none" title="Закрыть">&times;</button>
+        </div>
+        <p class="text-sm text-gray-500 mb-4">Пользователь:
+            <span id="tariffModalUserEmail" class="font-semibold text-gray-700"></span></p>
+        <div id="tariffModalCards" class="tariff-modal-cards"></div>
+        <div class="flex justify-end gap-3 mt-5">
+            <button type="button" id="tariffModalCancel"
+                    class="bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold py-2 px-5 rounded-md transition duration-200">
+                Отмена
+            </button>
+            <button type="button" id="tariffModalSave"
+                    class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-5 rounded-md transition duration-200">
+                Сохранить
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Toast-уведомление (та же логика, что в index.html) -->
+<div id="toast" class="fixed bottom-4 right-4 bg-gray-800 text-white px-6 py-3 rounded-lg shadow-lg transform translate-y-20 opacity-0 transition duration-300 pointer-events-none z-[100]">
+    <span id="toastMessage">Notification</span>
 </div>
 
 <script>
-// === Выбор тарифного плана пользователя (Vanilla JS, без jQuery) ===
+// === Назначение тарифного плана пользователя (Vanilla JS, без jQuery) ===
 (function () {
     // Список тарифов приходит из бэкенда (admin_users_page -> context["tariffs"])
     const TARIFFS = {{ tariffs | tojson }};
 
-    const dropdown = document.getElementById('tariffDropdown');
-    const itemsBox = document.getElementById('tariffDropdownItems');
-    const titleBox = document.getElementById('tariffDropdownTitle');
-    let activeCell = null;
-
-    function closeDropdown() {
-        dropdown.classList.add('hidden');
-        activeCell = null;
-    }
+    const modal = document.getElementById('setTariffModal');
+    const cardsBox = document.getElementById('tariffModalCards');
+    const userEmailEl = document.getElementById('tariffModalUserEmail');
+    const saveBtn = document.getElementById('tariffModalSave');
+    let activeCell = null;   // ячейка .tariff-cell, для обновления бейджа после сохранения
+    let selectedId = undefined;
 
     function fmtCost(cost) {
         return Math.round(cost || 0) + ' ₽/мес';
     }
 
-    function openDropdown(cell) {
-        const userId = cell.dataset.userId;
-        const userEmail = cell.dataset.userEmail;
-        const badge = cell.querySelector('.tariff-badge');
-        const currentId = badge && badge.classList.contains('tariff-none') ? null :
-            (TARIFFS.find(t => t.name === (badge ? badge.textContent.trim().split(' 💎')[0] : '')) || {}).id;
-
-        titleBox.textContent = 'Тариф: ' + userEmail;
-        itemsBox.innerHTML = '';
-
-        // Пункт "Не назначен"
-        const noneBtn = document.createElement('button');
-        noneBtn.type = 'button';
-        noneBtn.className = 'tariff-dropdown-item' + (currentId == null ? ' is-active' : '');
-        noneBtn.textContent = '⚠️ Не назначен';
-        noneBtn.addEventListener('click', function () { setTariff(userId, null, badge); });
-        itemsBox.appendChild(noneBtn);
-
-        // Все доступные тарифы
-        TARIFFS.forEach(function (t) {
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'tariff-dropdown-item' + (t.id === currentId ? ' is-active' : '');
-            btn.textContent = t.name + ' · ' + fmtCost(t.cost);
-            btn.addEventListener('click', function () { setTariff(userId, t.id, badge); });
-            itemsBox.appendChild(btn);
-        });
-
-        // Позиционирование под ячейкой
-        const rect = cell.getBoundingClientRect();
-        dropdown.style.top = (rect.bottom + window.scrollY + 4) + 'px';
-        dropdown.style.left = Math.max(8, rect.left + window.scrollX - 8) + 'px';
-        dropdown.classList.remove('hidden');
-        activeCell = cell;
+    // --- Toast (переиспользована логика showToast из index.html) ---
+    const toast = document.getElementById('toast');
+    const toastMsg = document.getElementById('toastMessage');
+    let toastTimer = null;
+    function showToast(message, isError) {
+        toastMsg.textContent = message;
+        toast.classList.remove('bg-gray-800', 'bg-green-600', 'bg-red-600');
+        toast.classList.add(isError ? 'bg-red-600' : 'bg-green-600');
+        toast.classList.add('toast-show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () { toast.classList.remove('toast-show'); }, 3000);
     }
 
-    function setTariff(userId, tariffPlanId, badgeEl) {
-        fetch('/admin/users/' + userId + '/set-tariff', {
+    function sourceNames(jsonStr) {
+        try {
+            const arr = JSON.parse(jsonStr || '[]');
+            const map = { ai: '🤖 ИИ', web_search: '🔎 Поиск', user_upload: '📤 Загрузка' };
+            return arr.map(function (s) { return map[s] || s; }).join(', ');
+        } catch (e) { return ''; }
+    }
+
+    function openModal(cell) {
+        const userId = cell.dataset.userId;
+        activeCell = cell;
+        modal.dataset.userId = userId;
+        userEmailEl.textContent = cell.dataset.userEmail || ('ID ' + userId);
+
+        // Определяем текущий тариф по data-атрибуту бейджа (надёжнее парсинга текста)
+        const badge = cell.querySelector('.tariff-badge');
+        selectedId = badge ? (badge.dataset.tariffId === 'none' ? null : parseInt(badge.dataset.tariffId, 10)) : null;
+
+        cardsBox.innerHTML = '';
+
+        // Карточка "Без тарифа" (сброс)
+        const noneCard = document.createElement('label');
+        noneCard.className = 'tariff-card tariff-card-none' + (selectedId === null ? ' is-selected' : '');
+        noneCard.innerHTML =
+            '<input type="radio" name="tariffChoice" value="" class="tariff-card-radio"' +
+            (selectedId === null ? ' checked' : '') + '>' +
+            '<div class="tariff-card-body"><div class="tariff-card-title">⚠️ Без тарифа</div>' +
+            '<div class="tariff-card-desc">Сброс тарифного плана: лимиты не проверяются, ' +
+            'картинки ограничиваются базовыми настройками.</div></div>';
+        cardsBox.appendChild(noneCard);
+
+        // Карточки всех доступных тарифов
+        TARIFFS.forEach(function (t) {
+            const card = document.createElement('label');
+            const premium = (t.cost || 0) >= 500;
+            card.className = 'tariff-card ' + (premium ? 'tariff-card-premium' : 'tariff-card-basic') +
+                (t.id === selectedId ? ' is-selected' : '');
+            const descParts = [
+                fmtCost(t.cost),
+                t.max_posts_per_week != null ? t.max_posts_per_week + ' пост./нед' : null,
+                t.max_posts_per_month != null ? t.max_posts_per_month + ' пост./мес' : null,
+                t.allows_images ? ('до ' + (t.max_images_per_post || 0) + ' картинок' +
+                    (sourceNames(t.allowed_image_sources) ? ' (' + sourceNames(t.allowed_image_sources) + ')' : ''))
+                    : 'без картинок'
+            ].filter(Boolean);
+            card.innerHTML =
+                '<input type="radio" name="tariffChoice" value="' + t.id + '" class="tariff-card-radio"' +
+                (t.id === selectedId ? ' checked' : '') + '>' +
+                '<div class="tariff-card-body"><div class="tariff-card-title">' +
+                (premium ? '💎 ' : '') + escapeHtml(t.name) + ' · ' + fmtCost(t.cost) + '</div>' +
+                '<div class="tariff-card-desc">' + escapeHtml(descParts.join(' · ')) + '</div></div>';
+            cardsBox.appendChild(card);
+        });
+
+        // Синхронизация выбранного значения и подсветки карточек
+        cardsBox.querySelectorAll('.tariff-card-radio').forEach(function (radio) {
+            radio.addEventListener('change', function () {
+                selectedId = radio.value === '' ? null : parseInt(radio.value, 10);
+                cardsBox.querySelectorAll('.tariff-card').forEach(function (c) { c.classList.remove('is-selected'); });
+                radio.closest('.tariff-card').classList.add('is-selected');
+            });
+        });
+
+        modal.classList.remove('hidden');
+    }
+
+    function closeModal() {
+        modal.classList.add('hidden');
+        activeCell = null;
+    }
+
+    function escapeHtml(s) {
+        const div = document.createElement('div');
+        div.textContent = String(s == null ? '' : s);
+        return div.innerHTML;
+    }
+
+    // Обновление DOM-ячейки тарифа конкретной строки (оптимизация вместо перезагрузки страницы)
+    function updateRowBadge(userId, tariffPlanId, tariffName) {
+        const row = document.querySelector('tr[data-row-user-id="' + userId + '"]');
+        if (!row) return;
+        const cell = row.querySelector('.tariff-cell');
+        if (!cell) return;
+        const old = cell.querySelector('.tariff-badge');
+        if (old) old.remove();
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        if (tariffName) {
+            const plan = TARIFFS.find(function (t) { return t.id === tariffPlanId; }) || {};
+            btn.className = 'tariff-badge ' + ((plan.cost || 0) >= 500 ? 'tariff-premium' : 'tariff-basic');
+            btn.textContent = tariffName + ' 💎 · ' + fmtCost(plan.cost || 0);
+            btn.dataset.tariffId = String(tariffPlanId);
+        } else {
+            btn.className = 'tariff-badge tariff-none';
+            btn.textContent = '⚠️ Не назначен';
+            btn.dataset.tariffId = 'none';
+        }
+        btn.title = 'Кликните, чтобы изменить тариф';
+        cell.appendChild(btn);
+        // Подсветка жёлтым на 2 секунды — визуальная индикация успешного изменения
+        row.classList.remove('row-flash');
+        void row.offsetWidth; // рестарт CSS-анимации
+        row.classList.add('row-flash');
+        setTimeout(function () { row.classList.remove('row-flash'); }, 2000);
+    }
+
+    function postSetTariff(userId, tariffPlanId) {
+        return fetch('/admin/users/' + userId + '/set-tariff', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ tariff_plan_id: tariffPlanId })
@@ -237,50 +361,124 @@
                 return resp.json().then(function (j) { throw new Error(j.detail || ('HTTP ' + resp.status)); });
             }
             return resp.json();
-        })
-        .then(function (data) {
-            closeDropdown();
-            // Обновляем бейдж без перезагрузки страницы
-            if (badgeEl && badgeEl.parentElement) {
-                const cell = badgeEl.parentElement;
-                badgeEl.remove();
-                const btn = document.createElement('button');
-                btn.type = 'button';
-                if (data.tariff_name) {
-                    const plan = TARIFFS.find(function (t) { return t.id === data.tariff_plan_id; }) || {};
-                    btn.className = 'tariff-badge ' + ((plan.cost || 0) >= 500 ? 'tariff-premium' : 'tariff-basic');
-                    btn.textContent = data.tariff_name + ' 💎 · ' + fmtCost(plan.cost || 0);
-                } else {
-                    btn.className = 'tariff-badge tariff-none';
-                    btn.textContent = '⚠️ Не назначен';
-                }
-                btn.title = 'Кликните, чтобы изменить тариф';
-                cell.appendChild(btn);
-            }
-        })
-        .catch(function (err) {
-            alert('Не удалось изменить тариф: ' + err.message);
         });
     }
 
-    // Делегирование: клик по любой ячейке с тарифом открывает dropdown
+    // --- Кнопки модального окна ---
+    saveBtn.addEventListener('click', function () {
+        if (!activeCell) return closeModal();
+        const userId = modal.dataset.userId;
+        saveBtn.disabled = true;
+        postSetTariff(userId, selectedId === null ? null : selectedId)
+            .then(function (data) {
+                closeModal();
+                updateRowBadge(data.user_id, data.tariff_plan_id, data.tariff_name);
+                showToast(data.tariff_name
+                    ? 'Тариф «' + data.tariff_name + '» назначен ✓'
+                    : 'Тариф снят ✓');
+            })
+            .catch(function (err) {
+                showToast('Ошибка: ' + err.message, true);
+            })
+            .finally(function () { saveBtn.disabled = false; });
+    });
+    document.getElementById('tariffModalCancel').addEventListener('click', closeModal);
+    document.getElementById('tariffModalClose').addEventListener('click', closeModal);
+    modal.addEventListener('click', function (e) { if (e.target === modal) closeModal(); });
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeModal();
+    });
+
+    // Делегирование: клик по любой ячейке с тарифом открывает модальное окно
     document.addEventListener('click', function (e) {
         const cell = e.target.closest('.tariff-cell');
         if (cell) {
+            e.preventDefault();
             e.stopPropagation();
-            if (activeCell === cell && !dropdown.classList.contains('hidden')) {
-                closeDropdown();
-            } else {
-                openDropdown(cell);
-            }
-            return;
+            openModal(cell);
         }
-        if (!dropdown.contains(e.target)) closeDropdown();
     });
-    document.addEventListener('keydown', function (e) {
-        if (e.key === 'Escape') closeDropdown();
+
+    // === Bonus: массовое назначение тарифа ===
+    const bulkBar = document.getElementById('bulkBar');
+    const bulkCount = document.getElementById('bulkCount');
+    const bulkSelect = document.getElementById('bulkTariffSelect');
+    const checkAll = document.getElementById('checkAllUsers');
+
+    // Заполняем select тарифами динамически
+    (function fillBulkSelect() {
+        const optNone = document.createElement('option');
+        optNone.value = '';
+        optNone.textContent = '⚠️ Без тарифа';
+        bulkSelect.appendChild(optNone);
+        TARIFFS.forEach(function (t) {
+            const opt = document.createElement('option');
+            opt.value = String(t.id);
+            opt.textContent = t.name + ' · ' + fmtCost(t.cost);
+            bulkSelect.appendChild(opt);
+        });
+    })();
+
+    function selectedUserIds() {
+        return Array.prototype.map.call(
+            document.querySelectorAll('.user-check:checked'),
+            function (cb) { return parseInt(cb.dataset.userId, 10); }
+        );
+    }
+
+    function refreshBulkBar() {
+        const ids = selectedUserIds();
+        bulkCount.textContent = String(ids.length);
+        bulkBar.classList.toggle('hidden', ids.length === 0);
+        checkAll.checked = ids.length > 0 &&
+            ids.length === document.querySelectorAll('.user-check').length;
+    }
+
+    document.addEventListener('change', function (e) {
+        if (e.target.classList.contains('user-check')) refreshBulkBar();
     });
-    window.addEventListener('scroll', closeDropdown, { passive: true });
+    checkAll.addEventListener('change', function () {
+        document.querySelectorAll('.user-check').forEach(function (cb) {
+            cb.checked = checkAll.checked;
+        });
+        refreshBulkBar();
+    });
+    document.getElementById('bulkClearBtn').addEventListener('click', function () {
+        document.querySelectorAll('.user-check').forEach(function (cb) { cb.checked = false; });
+        checkAll.checked = false;
+        refreshBulkBar();
+    });
+    document.getElementById('bulkApplyBtn').addEventListener('click', function () {
+        const ids = selectedUserIds();
+        if (!ids.length) return;
+        const planId = bulkSelect.value === '' ? null : parseInt(bulkSelect.value, 10);
+        const applyBtn = document.getElementById('bulkApplyBtn');
+        applyBtn.disabled = true;
+        fetch('/admin/users/set-tariff-bulk', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_ids: ids, tariff_plan_id: planId })
+        })
+        .then(function (resp) {
+            if (!resp.ok) {
+                return resp.json().then(function (j) { throw new Error(j.detail || ('HTTP ' + resp.status)); });
+            }
+            return resp.json();
+        })
+        .then(function (data) {
+            // Обновляем бейдж каждой затронутой строки без перезагрузки страницы
+            ids.forEach(function (id) {
+                updateRowBadge(id, data.tariff_plan_id, data.tariff_name);
+            });
+            document.querySelectorAll('.user-check').forEach(function (cb) { cb.checked = false; });
+            refreshBulkBar();
+            showToast('Тариф применён для ' + data.updated_count + ' пользовател(ей) ✓');
+        })
+        .catch(function (err) {
+            showToast('Ошибка: ' + err.message, true);
+        })
+        .finally(function () { applyBtn.disabled = false; });
+    });
 })();
 </script>
 {% endblock %}

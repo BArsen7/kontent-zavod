@@ -401,3 +401,78 @@ textarea { resize: vertical; }
 .tariff-dropdown-item:last-child { border-bottom: none; }
 .tariff-dropdown-item:hover { background: #eff6ff; color: #1d4ed8; }
 .tariff-dropdown-item.is-active { background: #ecfdf5; color: #047857; font-weight: 600; }
+
+/* === Админка: модальное окно назначения тарифа (admin_users.html) === */
+/* Общие стили модальных окон (вынесены из index.html в общий файл) */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 70;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background: rgba(17, 24, 39, .55);
+    backdrop-filter: blur(2px);
+}
+.modal-card {
+    max-height: 85vh;
+    overflow-y: auto;
+    animation: modal-pop .18s ease-out;
+}
+@keyframes modal-pop {
+    from { opacity: 0; transform: translateY(12px) scale(.98); }
+    to   { opacity: 1; transform: none; }
+}
+
+/* Карточки тарифов внутри модалки */
+.tariff-modal-cards {
+    display: flex;
+    flex-direction: column;
+    gap: .6rem;
+}
+.tariff-card {
+    display: flex;
+    align-items: flex-start;
+    gap: .7rem;
+    padding: .8rem 1rem;
+    border-radius: .6rem;
+    border: 2px solid #e5e7eb;
+    cursor: pointer;
+    transition: border-color .15s ease, box-shadow .15s ease, transform .1s ease;
+}
+.tariff-card:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0, 0, 0, .08); }
+.tariff-card.is-selected { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, .15); }
+.tariff-card-radio { margin-top: .25rem; accent-color: #2563eb; }
+.tariff-card-body { display: flex; flex-direction: column; gap: .2rem; }
+.tariff-card-title { font-size: .9rem; font-weight: 700; color: #1f2937; }
+.tariff-card-desc { font-size: .78rem; color: #6b7280; line-height: 1.35; }
+.tariff-card-premium { background: linear-gradient(to right, #fef3c7, #fde68a); border-color: #f59e0b; }
+.tariff-card-premium .tariff-card-title { color: #78350f; }
+.tariff-card-basic { background: #f9fafb; }
+.tariff-card-none { background: transparent; border-style: dashed; color: #9ca3af; }
+
+/* Toast-уведомления (управляются классом .toast-show — та же логика, что в index.html) */
+#toast.toast-show { transform: translateY(0); opacity: 1; }
+
+/* Подсветка жёлтым строки пользователя после успешного изменения тарифа (2 сек) */
+@keyframes row-flash-kf {
+    0%   { background-color: #fef08a; }
+    70%  { background-color: #fef9c3; }
+    100% { background-color: transparent; }
+}
+tr.row-flash > td { animation: row-flash-kf 2s ease-out forwards; }
+
+/* Панель массовых действий */
+.bulk-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .8rem;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-radius: .6rem;
+    padding: .7rem 1rem;
+    margin-bottom: 1rem;
+}
+.bulk-bar.hidden { display: none; }

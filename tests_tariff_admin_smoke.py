@@ -48,7 +48,7 @@ check("page 200", r.status_code == 200)
 check("header Тарифный план", "Тарифный план" in html)
 check("premium badge Про+990", "Про 💎 · 990 ₽/мес" in html and "tariff-premium" in html)
 check("none badge ⚠️ Не назначен", "⚠️ Не назначен" in html and "tariff-none" in html)
-check("dropdown markup", 'id="tariffDropdown"' in html and "tariff-dropdown-item" in html)
+check("modal markup", 'id="setTariffModal"' in html and "tariff-card" in html)
 import json as _json, codecs as _codecs
 _ok_json = False
 if 'const TARIFFS' in html:
@@ -86,7 +86,7 @@ db = SessionLocal(); u = db.query(User).get(plain_id); check("db unset", u.tarif
 
 # --- несуществующий тариф -> 404, несуществующий юзер -> 404 ---
 r = client.post(f"/admin/users/{plain_id}/set-tariff", json={"tariff_plan_id": 99999})
-check("bad tariff 404", r.status_code == 404)
+check("bad tariff 400", r.status_code == 400)
 r = client.post("/admin/users/99999/set-tariff", json={"tariff_plan_id": basic_id})
 check("bad user 404", r.status_code == 404)
 
