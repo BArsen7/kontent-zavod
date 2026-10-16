@@ -30,6 +30,11 @@
             word-wrap: break-word;
             overflow-wrap: break-word;
         }
+        /* Точные селекторы из требований (Промпт 2, Задача 2). */
+        .chat-message.assistant div:last-child, .chat-message.user div:last-child {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
         .chat-message.user {
             background-color: #3b82f6;
             color: white;

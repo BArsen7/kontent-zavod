@@ -325,6 +325,14 @@ textarea { resize: vertical; }
     overflow-wrap: break-word;
 }
 
+/* FIX (Промпт 2, Задача 2): точечные селекторы из требований — последний
+   дочерний div сообщения (пузырь с текстом) рендерит \n как реальные
+   переносы строк. */
+.chat-message.assistant div:last-child, .chat-message.user div:last-child {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
 /* FIX (Задача 3): стили страницы входа — баннер причины редиректа и ошибки формы.
    Классы в стиле Tailwind-утилит, уже используемых шаблонами, но без внешних CDN. */
 .bg-amber-50 { background-color: #fffbeb; }

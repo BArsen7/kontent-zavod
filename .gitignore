@@ -1,1 +1,3 @@
-data/autopilot.db
+__pycache__/
+*.pyc
+data/*.db
