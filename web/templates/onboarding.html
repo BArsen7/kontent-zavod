@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Онбординг — Autopilot Content</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <style>
+        /* Локальные стили страницы онбординга (без внешних CDN) */
+        .ob-wrap { max-width: 760px; margin: 2rem auto; padding: 0 1rem; }
+        .ob-card { background: #fff; border-radius: 12px; box-shadow: 0 4px 18px rgba(0,0,0,.08); overflow: hidden; display: flex; flex-direction: column; min-height: 70vh; }
+        .ob-header { padding: 1.25rem 1.5rem; border-bottom: 1px solid #e5e7eb; display: flex; align-items: center; gap: .75rem; }
+        .ob-header h1 { font-size: 1.25rem; font-weight: 700; color: #1f2937; margin: 0; }
+        .ob-header p { font-size: .85rem; color: #6b7280; margin: .15rem 0 0; }
+        .ob-chat { flex: 1; padding: 1.25rem 1.5rem; overflow-y: auto; display: flex; flex-direction: column; gap: .75rem; background: #f9fafb; }
+        .ob-input-row { display: flex; gap: .5rem; padding: 1rem 1.5rem; border-top: 1px solid #e5e7eb; background: #fff; }
+        .ob-input-row textarea { flex: 1; resize: none; border: 1px solid #d1d5db; border-radius: 8px; padding: .6rem .75rem; font: inherit; min-height: 44px; max-height: 120px; }
+        .ob-input-row textarea:focus { outline: 2px solid #2563eb33; border-color: #2563eb; }
+        .ob-send { background: #2563eb; color: #fff; border: none; border-radius: 8px; padding: .6rem 1.1rem; font-weight: 600; cursor: pointer; transition: background .15s; }
+        .ob-send:hover { background: #1d4ed8; }
+        .ob-send:disabled { background: #9ca3af; cursor: not-wait; cursor: wait; }
+        .ob-typing { color: #6b7280; font-style: italic; font-size: .85rem; padding-left: .25rem; display: none; }
+        .ob-community-select { margin: 0 1.5rem 1rem; display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: #374151; }
+        .ob-community-select select { border: 1px solid #d1d5db; border-radius: 6px; padding: .3rem .5rem; font: inherit; background:#fff; }
+        .ob-success { margin: 1rem 1.5rem; padding: 1rem 1.25rem; border-radius: 10px; border: 1px solid #10b981; background: #ecfdf5; color: #065f46; display: none; }
+        .ob-success a.btn-primary { display: inline-block; margin-top: .75rem; background: #059669; color: #fff; text-decoration: none; padding: .5rem 1rem; border-radius: 8px; font-weight: 600; }
+        .ob-skip { text-align: center; padding: .5rem 1.5rem 1rem; font-size: .8rem; }
+        .ob-skip a { color: #6b7280; }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+<div class="ob-wrap">
+    <div class="ob-card">
+        <div class="ob-header">
+            <span style="font-size:1.75rem;">🤖</span>
+            <div>
+                <h1>AI-консьерж</h1>
+                <p>Пара коротких вопросов — и я настрою генерацию контента под ваше сообщество</p>
+            </div>
+        </div>
+
+        {% if communities %}
+        <div class="ob-community-select">
+            <label for="obCommunity">Настраиваем сообщество:</label>
+            <select id="obCommunity">
+                {% for c in communities %}
+                <option value="{{ c.id }}">{{ c.group_name }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% endif %}
+
+        <div id="obChat" class="ob-chat" aria-live="polite"></div>
+        <div class="ob-typing" id="obTyping">Консьерж печатает…</div>
+
+        <div class="ob-success" id="obSuccess">
+            <strong>✅ Сообщество настроено!</strong><br>
+            Я заполнил анкету (цель, специфика, ЦА) на основе нашего диалога.
+            Теперь можно переходить к контент-менеджеру.
+            <br><a class="btn-primary" id="obContinue" href="/content-manager">Перейти в контент-менеджер →</a>
+        </div>
+
+        <div class="ob-input-row" id="obInputRow">
+            <textarea id="obMessage" rows="1" placeholder="Ваш ответ… (Enter — отправить, Shift+Enter — новая строка)"></textarea>
+            <button class="ob-send" id="obSendBtn" type="button">Отправить</button>
+        </div>
+        <div class="ob-skip"><a href="/content-manager">Пропустить настройку и перейти к контент-менеджеру</a></div>
+    </div>
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    const chatEl = document.getElementById('obChat');
+    const inputEl = document.getElementById('obMessage');
+    const sendBtn = document.getElementById('obSendBtn');
+    const typingEl = document.getElementById('obTyping');
+    const successEl = document.getElementById('obSuccess');
+    const inputRow = document.getElementById('obInputRow');
+    const communitySel = document.getElementById('obCommunity');
+
+    // Текущее выбранное сообщество (если есть) — контекст сохраняется для него
+    function currentCommunityId() {
+        return communitySel ? parseInt(communitySel.value, 10) || null : null;
+    }
+
+    // XSS-safe добавление сообщения: только textContent + white-space: pre-wrap
+    function appendBubble(role, content) {
+        const row = document.createElement('div');
+        row.className = 'flex ' + (role === 'user' ? 'justify-end' : 'justify-start');
+        const bubble = document.createElement('div');
+        bubble.className = 'chat-message-bubble ' + (role === 'user'
+            ? 'bg-blue-600 text-white rounded-lg px-4 py-2 max-w-[80%]'
+            : 'bg-white border border-gray-200 text-gray-800 rounded-lg px-4 py-2 max-w-[80%] shadow-sm');
+        bubble.textContent = content;
+        row.appendChild(bubble);
+        chatEl.appendChild(row);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        return bubble;
+    }
+
+    function setBusy(busy) {
+        sendBtn.disabled = busy;
+        inputEl.disabled = busy;
+        typingEl.style.display = busy ? 'block' : 'none';
+    }
+
+    async function postChat(message) {
+        const resp = await fetch('/api/onboarding/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ message: message || '', community_id: currentCommunityId() })
+        });
+        if (!resp.ok) {
+            let detail = 'Ошибка сервера';
+            try { detail = (await resp.json()).detail || detail; } catch (e) { /* ignore */ }
+            throw new Error(detail);
+        }
+        return await resp.json();
+    }
+
+    function showDone(data) {
+        inputRow.style.display = 'none';
+        successEl.style.display = 'block';
+        if (data && data.redirect_url) {
+            const target = data.redirect_url + (data.redirect_url.includes('?') ? '&' : '?') + 'onboarded=1';
+            document.getElementById('obContinue').href = target;
+            // Короткая пауза для readability — затем сам редирект
+            setTimeout(function () { window.location.href = target; }, 2500);
+        }
+    }
+
+    async function sendMessage() {
+        const text = (inputEl.value || '').trim();
+        if (!text) return;
+        inputEl.value = '';
+        appendBubble('user', text);
+        setBusy(true);
+        try {
+            const data = await postChat(text);
+            if (data.status === 'configured') {
+                appendBubble('assistant', data.reply || 'Готово! Контекст сохранён.');
+                showDone(data);
+            } else {
+                appendBubble('assistant', data.reply || 'Хм, не получил ответа. Попробуйте ещё раз.');
+            }
+        } catch (err) {
+            appendBubble('assistant', '⚠️ ' + err.message);
+        } finally {
+            setBusy(false);
+            inputEl.focus();
+        }
+    }
+
+    // Enter — отправить, Shift+Enter — перенос строки (как в основном чате)
+    inputEl.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+    sendBtn.addEventListener('click', sendMessage);
+
+    // Стартовое приветствие консьержа (первый вызов с пустым сообщением)
+    (async function init() {
+        setBusy(true);
+        try {
+            const data = await postChat('');
+            appendBubble('assistant', data.reply);
+            if (data.status === 'configured') showDone(data);
+        } catch (err) {
+            appendBubble('assistant', '⚠️ Не удалось начать диалог: ' + err.message);
+        } finally {
+            setBusy(false);
+            inputEl.focus();
+        }
+    })();
+})();
+</script>
+</body>
+</html>

@@ -115,6 +115,17 @@ from services.tariff_service import (
     assign_images_to_post as _assign_images_to_post,
     get_user_tariff as _get_user_tariff,
 )
+# FIX (онбординг): AI-консьерж — диалоговая настройка CommunityGenerationContext
+import re as _re  # валидация имени сообщества из диалога консьержа
+from services.onboarding_service import (
+    ONBOARDING_GREETING,
+    MIN_USER_TURNS_FOR_EXTRACTION,
+    onboarding_store,
+    concierge_reply,
+    extract_onboarding_data,
+    save_onboarding_context,
+    needs_onboarding,
+)
 from managers.community_manager import CommunityManager
 from vk_errors import create_vk_session, describe_api_error, positive_group_id
 from services.scheduler import start_scheduler
@@ -1161,16 +1172,25 @@ def index(request: Request, db: Session = Depends(get_db)):
 
 @app.get("/content-manager")
 def content_manager_page(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
-    request: Request, db: Session = Depends(get_db)):
+    request: Request,
+    onboarded: int = Query(0, ge=0, le=1),  # обход авторедиректа на онбординг
+    db: Session = Depends(get_db)):
     """Рендерит страницу контент-менеджера.
 
     FIX (Задача 3): неавторизованных редиректит на /login с сообщением и
     сохранённым URL (next), заблокированных — на /account-blocked.
+
+    FIX (онбординг): нового пользователя (нет сообществ или нет ни одного
+    настроенного CommunityGenerationContext) встречаем AI-консьержем —
+    редирект на /onboarding. Флаг ?onboarded=1 ставится после завершения
+    онбординга и отключает авторедирект (пользователь уже всё настроил).
     """
     redirect = _web_access_guard(request, db)
     if redirect is not None:
         return redirect
     user = get_current_user(request, db)
+    if not onboarded and needs_onboarding(db, user.id):
+        return RedirectResponse(url="/onboarding", status_code=302)
     return templates.TemplateResponse(
         request=request,
         name="content_manager.html",
@@ -1275,9 +1295,44 @@ def register(  # FIX: Event loop unblocked — синхронный роут в�
 
     logger.info(f"Зарегистрирован новый пользователь: {email} (ID: {user.id})")
 
-    # Создаем сессию и перенаправляем на главную страницу
+    # FIX (онбординг): нового пользователя встречаем AI-консьержем вместо
+    # «скучной» главной страницы — там он за пару вопросов настроит сообщество.
     session_id = create_session(user, db)  # FIX: сессии хранятся в БД, а не в памяти
-    return authenticated_redirect(RedirectResponse(url="/", status_code=302), session_id)
+    return authenticated_redirect(
+        RedirectResponse(url="/onboarding", status_code=302), session_id
+    )
+
+
+@app.get("/onboarding")
+def onboarding_page(  # синхронный роут — выполняется в threadpool FastAPI
+    request: Request, db: Session = Depends(get_db)):
+    """Страница онбординга «AI-консьерж».
+
+    Показывается всем пользователям без настроенных сообществ; при наличии
+    хотя бы одного CommunityGenerationContext с is_configured=True редиректит
+    в основной интерфейс контент-менеджера.
+    """
+    redirect = _web_access_guard(
+        request, db,
+        login_message="Для настройки сообщества необходимо войти в систему",
+    )
+    if redirect is not None:
+        return redirect
+    user = get_current_user(request, db)
+    if not needs_onboarding(db, user.id):
+        return RedirectResponse(url="/content-manager", status_code=302)
+    communities = db.query(UserCommunity).filter(UserCommunity.user_id == user.id).all()
+    return templates.TemplateResponse(
+        request=request,
+        name="onboarding.html",
+        context={
+            "user": user,
+            "communities": [
+                {"id": c.id, "group_name": c.group_name or f"Сообщество {c.id}", "group_id": c.group_id}
+                for c in communities
+            ],
+        },
+    )
 
 
 @app.get("/logout")
@@ -2011,11 +2066,20 @@ def add_user_community(  # FIX: Event loop unblocked — синхронный р
     db.refresh(user_community)
     
     logger.info(f"Пользователь {user.email} добавил сообщество {group_name} ({group_id})")
-    
+
+    # FIX (онбординг): сразу создаём CommunityGenerationContext с
+    # is_configured=False, чтобы UI контент-менеджера мог предложить
+    # AI-консьержа / анкету настройки для нового сообщества.
+    try:
+        get_or_create_generation_context(db, user_community.id)
+    except Exception as ctx_err:  # noqa: BLE001 — контекст не должен ронять добавление
+        logger.warning(f"[communities/add] Не удалось создать контекст генерации: {ctx_err}")
+
     return {
         "success": True,
         "group_id": group_id,
         "group_name": group_name,
+        "community_id": user_community.id,
         "message": f"Сообщество {group_name} успешно добавлено"
     }
 
@@ -2125,6 +2189,163 @@ def unregister_community(  # FIX: Event loop unblocked — синхронный 
 
 
 # --- Content Manager (Marketing Assistant) API Endpoints ---
+
+# --- AI-консьерж: онбординг нового пользователя -------------------------
+
+
+class OnboardingChatRequest(BaseModel):
+    """Тело запроса диалога с AI-консьержем (/api/onboarding/chat)."""
+
+    message: Optional[str] = None          # ответ пользователя; пустой/None -> приветствие
+    community_id: Optional[int] = None     # UserCommunity.id (если сообщество уже добавлено)
+    reset: bool = False                    # начать диалог заново
+
+
+def _onboarding_finish(db: Session, user: User, state: dict) -> Dict[str, Any]:
+    """Финализация онбординга: извлечение данных LLM + сохранение контекста.
+
+    Возвращает JSON с redirect_url в основной интерфейс контент-менеджера.
+    Синхронная функция — вызывается только из threadpool-роута.
+    """
+    from services.content_service import _default_use_local
+
+    dialog = list(state["messages"])
+    use_local = _default_use_local(db)
+
+    extracted = extract_onboarding_data(dialog, use_local=use_local) or {}
+    if extracted.get("community_name"):
+        extracted.setdefault("specifics", extracted.get("community_name"))
+
+    target_community_id = state.get("community_id")
+
+    if target_community_id is None:
+        # Сообщество ещё не добавлено в VK — создаём запись UserCommunity по
+        # названию из диалога (токен пользователь допишет позже; генерация
+        # постов станет доступна после привязки реального сообщества).
+        name = (extracted.get("community_name") or "").strip()
+        name = _re.sub(r"[\"'`\\]", "", name)[:200] or f"Сообщество {user.id}"
+        placeholder = UserCommunity(
+            user_id=user.id,
+            group_id=0,  # 0 — «заглушка»: сообщество создано консьержем до привязки VK
+            group_name=name,
+            group_token="",
+            is_admin=True,
+            can_post=False,
+        )
+        db.add(placeholder)
+        db.commit()
+        db.refresh(placeholder)
+        target_community_id = placeholder.id
+
+    ctx = save_onboarding_context(db, target_community_id, extracted)
+
+    onboarding_store.reset(user.id)
+    return {
+        "status": "configured",
+        "reply": "Отлично, всё сохранил! Теперь можно генерировать контент-план. 🎉",
+        "context": {
+            "goal": ctx.goal,
+            "community_specifics": ctx.community_specifics,
+            "target_audience": ctx.target_audience,
+            "is_configured": ctx.is_configured,
+        },
+        "community_id": target_community_id,
+        "redirect_url": "/content-manager?onboarded=1",
+    }
+
+
+@app.post("/api/onboarding/chat")
+async def onboarding_chat(
+    payload: OnboardingChatRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Шаг диалога с AI-консьержем для настройки сообщества (онбординг).
+
+    - Первый вызов (message пуст) -> приветствие консьержа.
+    - Далее LLM задаёт короткие вопросы; когда ответов достаточно
+      (DONE или >= MIN_USER_TURNS_FOR_EXTRACTION реплик пользователя),
+      выполняется отдельный вызов LLM-извлечения JSON (goal/specifics/
+      audience) и сохранение в CommunityGenerationContext с
+      is_configured=True.
+
+    Синхронные обращения к БД и LLM вынесены в asyncio.to_thread, чтобы
+    не блокировать event loop FastAPI.
+    """
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+    if getattr(user, "is_blocked", False):
+        raise HTTPException(status_code=403, detail="Аккаунт заблокирован")
+
+    if payload.reset:
+        await asyncio.to_thread(onboarding_store.reset, user.id)
+
+    state = onboarding_store.ensure(user.id)
+    if payload.community_id:
+        # Проверяем принадлежность сообщества пользователю
+        owns = await asyncio.to_thread(
+            lambda: db.query(UserCommunity).filter(
+                UserCommunity.id == payload.community_id,
+                UserCommunity.user_id == user.id,
+            ).first()
+        )
+        if not owns:
+            raise HTTPException(status_code=404, detail="Сообщество не найдено")
+        state["community_id"] = payload.community_id
+
+    message = (payload.message or "").strip()[:2000]
+
+    # Приветствие (первый шаг диалога)
+    if not message and not state["messages"]:
+        state["messages"].append({"role": "assistant", "content": ONBOARDING_GREETING})
+        return {"status": "question", "reply": ONBOARDING_GREETING}
+
+    if not message:
+        # Уже есть история, но пустое сообщение — возвращаем последний вопрос
+        last = state["messages"][-1] if state["messages"] else None
+        return {
+            "status": "done" if state.get("done") else "question",
+            "reply": (last or {}).get("content", ONBOARDING_GREETING),
+        }
+
+    state["messages"].append({"role": "user", "content": message})
+
+    # Достаточно ли реплик, чтобы пробовать финализацию?
+    user_turns = sum(1 for m in state["messages"] if m["role"] == "user")
+    if user_turns >= MIN_USER_TURNS_FOR_EXTRACTION:
+        result = await asyncio.to_thread(_onboarding_finish, db, user, dict(state))
+        return result
+
+    # Иначе — следующий короткий вопрос консьержа (LLM, в отдельном потоке)
+    use_local = await asyncio.to_thread(lambda: _default_use_local_safe(db))
+    reply = await asyncio.to_thread(concierge_reply, list(state["messages"]), use_local)
+    if (reply or "").strip().upper().startswith("DONE"):
+        result = await asyncio.to_thread(_onboarding_finish, db, user, dict(state))
+        return result
+    state["messages"].append({"role": "assistant", "content": reply})
+    return {"status": "question", "reply": reply}
+
+
+def _default_use_local_safe(db: Session) -> bool:
+    """Обёртка над _default_use_local с fallback при любых ошибках."""
+    try:
+        from services.content_service import _default_use_local
+        return _default_use_local(db)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+@app.get("/api/onboarding/status")
+def onboarding_status(  # синхронный роут — выполняется в threadpool FastAPI
+    request: Request, db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Нужен ли текущему пользователю онбординг (нет сообществ / контекстов)."""
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+    return {"needs_onboarding": needs_onboarding(db, user.id)}
+
 
 @app.get("/api/content-manager/periods")
 def get_content_plan_periods(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
