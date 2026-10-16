@@ -51,13 +51,14 @@
     </form>
 </div>
 
-<div class="bg-white rounded-lg shadow overflow-hidden">
+<div class="bg-white rounded-lg shadow overflow-x-auto">
     <table class="min-w-full divide-y divide-gray-200">
         <thead class="bg-gray-50">
             <tr>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Имя</th>
+                <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Тарифный план</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Админ?</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Статус</th>
                 <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Дата регистрации</th>
@@ -70,6 +71,19 @@
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{{ user.id }}</td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-800">{{ user.email }}</td>
                 <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-600">{{ user.first_name or "—" }}</td>
+                <!-- Колонка "Тарифный план": интерактивная (клик открывает dropdown) -->
+                <td class="px-6 py-4 whitespace-nowrap">
+                    <div class="tariff-cell relative" data-user-id="{{ user.id }}" data-user-email="{{ user.email }}">
+                        {% if user.tariff_name %}
+                            <button type="button"
+                                    class="tariff-badge {% if user.tariff_cost and user.tariff_cost >= 500 %}tariff-premium{% else %}tariff-basic{% endif %}"
+                                    title="Кликните, чтобы изменить тариф">{{ user.tariff_name }} 💎 · {{ "%.0f"|format(user.tariff_cost) }} ₽/мес</button>
+                        {% else %}
+                            <button type="button" class="tariff-badge tariff-none"
+                                    title="Кликните, чтобы назначить тариф">⚠️ Не назначен</button>
+                        {% endif %}
+                    </div>
+                </td>
                 <td class="px-6 py-4 whitespace-nowrap">
                     {% if user.is_admin %}
                         <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">Да</span>
@@ -142,10 +156,131 @@
             </tr>
             {% else %}
             <tr>
-                <td colspan="7" class="px-6 py-8 text-center text-sm text-gray-500">Пользователей нет.</td>
+                <td colspan="8" class="px-6 py-8 text-center text-sm text-gray-500">Пользователей нет.</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
 </div>
+
+<!-- Dropdown для выбора тарифа (один на страницу, позиционируется у ячейки) -->
+<div id="tariffDropdown" class="tariff-dropdown hidden">
+    <div class="text-xs font-semibold text-gray-500 px-3 py-2 border-b border-gray-100"
+         id="tariffDropdownTitle">Выберите тариф</div>
+    <div id="tariffDropdownItems"></div>
+</div>
+
+<script>
+// === Выбор тарифного плана пользователя (Vanilla JS, без jQuery) ===
+(function () {
+    // Список тарифов приходит из бэкенда (admin_users_page -> context["tariffs"])
+    const TARIFFS = {{ tariffs | tojson }};
+
+    const dropdown = document.getElementById('tariffDropdown');
+    const itemsBox = document.getElementById('tariffDropdownItems');
+    const titleBox = document.getElementById('tariffDropdownTitle');
+    let activeCell = null;
+
+    function closeDropdown() {
+        dropdown.classList.add('hidden');
+        activeCell = null;
+    }
+
+    function fmtCost(cost) {
+        return Math.round(cost || 0) + ' ₽/мес';
+    }
+
+    function openDropdown(cell) {
+        const userId = cell.dataset.userId;
+        const userEmail = cell.dataset.userEmail;
+        const badge = cell.querySelector('.tariff-badge');
+        const currentId = badge && badge.classList.contains('tariff-none') ? null :
+            (TARIFFS.find(t => t.name === (badge ? badge.textContent.trim().split(' 💎')[0] : '')) || {}).id;
+
+        titleBox.textContent = 'Тариф: ' + userEmail;
+        itemsBox.innerHTML = '';
+
+        // Пункт "Не назначен"
+        const noneBtn = document.createElement('button');
+        noneBtn.type = 'button';
+        noneBtn.className = 'tariff-dropdown-item' + (currentId == null ? ' is-active' : '');
+        noneBtn.textContent = '⚠️ Не назначен';
+        noneBtn.addEventListener('click', function () { setTariff(userId, null, badge); });
+        itemsBox.appendChild(noneBtn);
+
+        // Все доступные тарифы
+        TARIFFS.forEach(function (t) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'tariff-dropdown-item' + (t.id === currentId ? ' is-active' : '');
+            btn.textContent = t.name + ' · ' + fmtCost(t.cost);
+            btn.addEventListener('click', function () { setTariff(userId, t.id, badge); });
+            itemsBox.appendChild(btn);
+        });
+
+        // Позиционирование под ячейкой
+        const rect = cell.getBoundingClientRect();
+        dropdown.style.top = (rect.bottom + window.scrollY + 4) + 'px';
+        dropdown.style.left = Math.max(8, rect.left + window.scrollX - 8) + 'px';
+        dropdown.classList.remove('hidden');
+        activeCell = cell;
+    }
+
+    function setTariff(userId, tariffPlanId, badgeEl) {
+        fetch('/admin/users/' + userId + '/set-tariff', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tariff_plan_id: tariffPlanId })
+        })
+        .then(function (resp) {
+            if (!resp.ok) {
+                return resp.json().then(function (j) { throw new Error(j.detail || ('HTTP ' + resp.status)); });
+            }
+            return resp.json();
+        })
+        .then(function (data) {
+            closeDropdown();
+            // Обновляем бейдж без перезагрузки страницы
+            if (badgeEl && badgeEl.parentElement) {
+                const cell = badgeEl.parentElement;
+                badgeEl.remove();
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                if (data.tariff_name) {
+                    const plan = TARIFFS.find(function (t) { return t.id === data.tariff_plan_id; }) || {};
+                    btn.className = 'tariff-badge ' + ((plan.cost || 0) >= 500 ? 'tariff-premium' : 'tariff-basic');
+                    btn.textContent = data.tariff_name + ' 💎 · ' + fmtCost(plan.cost || 0);
+                } else {
+                    btn.className = 'tariff-badge tariff-none';
+                    btn.textContent = '⚠️ Не назначен';
+                }
+                btn.title = 'Кликните, чтобы изменить тариф';
+                cell.appendChild(btn);
+            }
+        })
+        .catch(function (err) {
+            alert('Не удалось изменить тариф: ' + err.message);
+        });
+    }
+
+    // Делегирование: клик по любой ячейке с тарифом открывает dropdown
+    document.addEventListener('click', function (e) {
+        const cell = e.target.closest('.tariff-cell');
+        if (cell) {
+            e.stopPropagation();
+            if (activeCell === cell && !dropdown.classList.contains('hidden')) {
+                closeDropdown();
+            } else {
+                openDropdown(cell);
+            }
+            return;
+        }
+        if (!dropdown.contains(e.target)) closeDropdown();
+    });
+    document.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') closeDropdown();
+    });
+    window.addEventListener('scroll', closeDropdown, { passive: true });
+})();
+</script>
 {% endblock %}
