@@ -305,24 +305,55 @@ def require_auth(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
+def _wants_html_page(request: Request) -> bool:
+    """Определяет, является ли запрос навигацией браузера (GET HTML-страницы).
+
+    POST/PUT/DELETE-запросы (в т.ч. fetch/AJAX из панелей администратора)
+    считаются API и должны получать JSON-ответы с кодом ошибки; GET-навигация
+    браузера — редиректы на страницы-заглушки (UX FIX, Промпт 4).
+    """
+    if request.method.upper() != "GET":
+        return False
+    accept = request.headers.get("accept", "")
+    return ("text/html" in accept) or ("*/*" in accept and "application/json" not in accept)
+
+
 def get_current_admin(request: Request, db: Session = Depends(get_db)) -> User:
     """Зависимость FastAPI: требует авторизованного пользователя с правами администратора.
 
     Используется для защиты эндпоинтов панели администратора.
     Права выдаются скриптом scripts/make_admin.py (поле User.is_admin).
-    Заблокированный администратор перенаправляется на /account-blocked.
+
+    FIX (Промпт 4, UX): вместо «сырого» JSON {"detail": ...} при доступе через
+    браузер (GET-навигация) возвращаются человекочитаемые редиректы:
+      - не авторизован             -> RedirectResponse("/login?msg=...&next=<текущий URL>")
+      - заблокирован               -> RedirectResponse("/account-blocked")
+      - авторизован, но не админ   -> RedirectResponse("/no-admin-access")
+    Для POST/PUT/DELETE и явных API-запросов (fetch без Accept: text/html)
+    сохраняется прежнее поведение — HTTPException(401/403) в формате JSON.
     """
     user = get_current_user(request, db)
-    if not user or not getattr(user, "is_admin", False):
+    html_page = _wants_html_page(request)
+
+    if not user:
+        if html_page:
+            # Сообщение о необходимости входа формирует страница /login;
+            # здесь достаточно передать next — путь исходной страницы.
+            params = {"next": request.url.path}
+            return RedirectResponse(url="/login?" + urlencode(params), status_code=302)  # type: ignore[return-value]
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+
+    if getattr(user, "is_blocked", False):
+        if html_page:
+            return RedirectResponse(url="/account-blocked", status_code=302)  # type: ignore[return-value]
+        raise HTTPException(status_code=403, detail="Аккаунт заблокирован")
+
+    if not getattr(user, "is_admin", False):
+        if html_page:
+            return RedirectResponse(url="/no-admin-access", status_code=302)  # type: ignore[return-value]
         raise HTTPException(
             status_code=403,
             detail="Доступ запрещен. Требуются права администратора.",
-        )
-    if getattr(user, "is_blocked", False):
-        raise HTTPException(
-            status_code=307,
-            detail="account-blocked",
-            headers={"Location": "/account-blocked"},
         )
     return user
 
@@ -330,6 +361,49 @@ def get_current_admin(request: Request, db: Session = Depends(get_db)) -> User:
 # --- Admin Panel Routes (Часть 2: backend-логика панели администратора) ---
 # Все роуты ниже защищены зависимостью Depends(get_current_admin).
 # Шаблоны admin_*.html будут созданы в Части 3; backend готов и работает уже сейчас.
+
+
+@app.middleware("http")
+async def admin_page_redirect_middleware(request: Request, call_next):
+    """UX FIX (Промпт 4): HTML-навигация по /admin* без прав -> человекочитаемые страницы.
+
+    get_current_admin возвращает RedirectResponse как «значение» зависимости,
+    но FastAPI игнорирует его (схема ответа эндпоинта — TemplateResponse),
+    из-за чего роут падал с AttributeError. Этот middleware перехватывает
+    такие случаи ДО выполнения роута:
+      - GET /admin* c Accept: text/html;
+      - нет валидной сессии          -> 302 /login?msg=...&next=<путь>;
+      - заблокированный аккаунт      -> 302 /account-blocked;
+      - авторизован, но не is_admin  -> 302 /no-admin-access.
+    POST/PUT/DELETE и запросы без Accept: text/html не затрагиваются — они
+    получают прежние JSON-ответы 401/403 от HTTPException в зависимости.
+    """
+    path = request.url.path
+    if (
+        request.method == "GET"
+        and (path == "/admin" or path.startswith("/admin/"))
+        and _wants_html_page(request)
+    ):
+        db = next(iter(get_db()))
+        try:
+            guard_user = get_current_user(request, db)
+            redirect = None
+            if guard_user is None:
+                redirect = _redirect_to_login(
+                    "Для доступа к панели администратора необходимо войти в систему",
+                    path,
+                )
+            elif getattr(guard_user, "is_blocked", False):
+                # Заблокированный пользователь — на страницу с причиной блокировки
+                redirect = RedirectResponse(url="/account-blocked", status_code=302)
+            elif not getattr(guard_user, "is_admin", False):
+                # Авторизован, но без прав — человекочитаемая страница-заглушка
+                redirect = RedirectResponse(url="/no-admin-access", status_code=302)
+        finally:
+            db.close()
+        if redirect is not None:
+            return redirect
+    return await call_next(request)
 
 @app.get("/admin")
 def admin_dashboard(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
@@ -1148,6 +1222,22 @@ def account_blocked_page(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse(
         request=request,
         name="account_blocked.html",
+        context={"user": user},
+    )
+
+
+@app.get("/no-admin-access")
+def no_admin_access_page(request: Request, db: Session = Depends(get_db)):
+    """Публичная страница 'Доступ запрещён' (нет прав администратора).
+
+    FIX (Промпт 4): на неё редиректит get_current_admin при GET-навигации
+    браузера авторизованного пользователя без is_admin. Страница доступна по
+    прямому URL без авторизации и не отображается в навигационном меню.
+    """
+    user = get_current_user(request, db)
+    return templates.TemplateResponse(
+        request=request,
+        name="no_admin_access.html",
         context={"user": user},
     )
 
