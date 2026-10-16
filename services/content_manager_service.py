@@ -71,6 +71,78 @@ CONTEXT_SETUP_BLOCK_C = (
     "(можно выбрать несколько)"
 )
 
+# === УМНЫЙ СТАРТ ДИАЛОГА (smart start) ===
+# Сообщение для случая, когда анкета НЕ заполнена: вместо шаблонного списка
+# из 3-5 вопросов пользователь получает одно компактное сообщение с просьбой
+# заполнить форму настроек — на фронтенде она открывается автоматически
+# (openContextModal()) для сообществ с is_configured == False.
+CONTEXT_SETUP_FORM_MESSAGE = (
+    "Здравствуйте! Я ваш персональный контент-менеджер. "
+    "Чтобы я не задавал вам шаблонные вопросы, заполните, пожалуйста, "
+    "форму настроек сообщества, которая открылась перед вами: цель, "
+    "специфика, ЦА, что уже работает и предпочтения по картинкам. "
+    "Сохраните её — и мы сразу перейдём к генерации плана."
+)
+
+
+def build_smart_start_message(ctx: CommunityGenerationContext) -> str:
+    """Формирует «умное» приветствие при заполненной анкете сообщества.
+
+    Резюмирует данные из CommunityGenerationContext (цель, ЦА) и предлагает
+    скорректировать вводные либо сразу приступить к генерации — базовые
+    вопросы при этом НЕ задаются.
+
+    Args:
+        ctx: настроенный контекст генерации (is_configured == True)
+
+    Returns:
+        str: текст приветственного сообщения от имени ИИ
+    """
+    goal = (ctx.goal or "").strip() or "не указана"
+    audience = (ctx.target_audience or "").strip() or "не указана"
+    return (
+        f"Я проанализировал ваше сообщество. Вижу, что ваша цель: {goal}, "
+        f"ЦА: {audience}. На основе этого я готов предложить план. Хотите "
+        "скорректировать вводные или сразу приступим к генерации?"
+    )
+
+
+# Признаки шаблонных вопросов анкеты в ответе LLM (используется как guard:
+# если модель всё-таки задала базовые вопросы, такой ответ не принимается).
+_TEMPLATE_QUESTION_MARKERS = (
+    "какая цель",
+    "цель сообщества",
+    "специфик",
+    "целевая аудитория",
+    "кто ваша",
+    "что у вас уже есть",
+    "что лучше всего работает",
+    "что уже работает",
+    "предпочтения по картинкам",
+    "картинки в постах",
+)
+
+
+def _looks_like_template_questions(text: str) -> bool:
+    """True, если текст похож на шаблонные вопросы анкеты (повтор того, что ИИ уже знает)."""
+    lowered = (text or "").lower()
+    hits = sum(1 for marker in _TEMPLATE_QUESTION_MARKERS if marker in lowered)
+    return hits >= 2
+
+
+def _configured_context_note(ctx: Optional[CommunityGenerationContext]) -> str:
+    """Инструкция для system_prompt: анкета заполнена, известные данные не спрашивать."""
+    if ctx is None:
+        return ""
+    return (
+        "\n\nАНКЕТА СООБЩЕСТВА УЖЕ ЗАПОЛНЕНА (см. CONTEXT/ANALYTICS): "
+        f"цель — «{(ctx.goal or '').strip() or 'не указана'}», "
+        f"ЦА — «{(ctx.target_audience or '').strip() or 'не указана'}». "
+        "НЕ задавай пользователю вопросы о цели, специфике, ЦА, том, что уже "
+        "работает, и предпочтениях по картинкам — ты уже знаешь эти данные. "
+        "Сразу предлагай план или уточняй только новые детали."
+    )
+
 
 def get_or_create_generation_context(
     db: Session,
@@ -527,10 +599,11 @@ def generate_ai_response(
 
     context += f"\n\nПользователь: {user_message}\n\nАссистент:"
 
-    # FIX (игнорирование анкеты и аналитики): если сообщество настроено
-    # (CommunityGenerationContext.is_configured == True) и/или есть
-    # исторические посты — данные внедряются в системный промпт как блоки
-    # <CONTEXT>/<ANALYTICS>, и базовые вопросы больше не задаются.
+    # FIX (игнорирование анкеты и аналитики + умный старт): если сообщество
+    # настроено (CommunityGenerationContext.is_configured == True) — данные
+    # внедряются в системный промпт как блоки <CONTEXT>/<ANALYTICS>, и ИИ НЕ
+    # задаёт вопросы о том, что уже знает. Проверка контекста выполняется при
+    # каждом ответе, включая первый.
     system_prompt = CONTENT_MANAGER_SYSTEM_PROMPT
     community = _period_user_community(db, period)
     ctx = (
@@ -540,37 +613,29 @@ def generate_ai_response(
     )
     top_posts = _top_historical_posts(db, community.group_id) if community is not None else []
     analytics_block = build_analytics_block(db, period) if (ctx is not None or top_posts) else ""
-    if analytics_block:
+    if ctx is not None:
+        # Контекст ЕСТЬ: добавляем аналитику (если есть) и явный запрет
+        # переспрашивать известные данные.
+        if analytics_block:
+            system_prompt = f"{system_prompt}\n\n{analytics_block}"
+        system_prompt += _configured_context_note(ctx)
+    elif analytics_block:
+        # Только история постов без заполненной анкеты — используем её,
+        # но диалог настройки не отменяем.
         system_prompt = (
             f"{system_prompt}\n\n{analytics_block}\n\n"
-            "Пользователь уже заполнил анкету сообщества, и у тебя есть его "
-            "история постов (см. ANALYTICS). НЕ задавай базовые вопросы (цель, "
-            "специфика, ЦА, что работает, картинки) — опирайся на известные данные."
+            "У тебя есть история постов сообщества (см. ANALYTICS), но анкета "
+            "ещё не заполнена — уточняй недостающие вводные."
         )
-    elif community is not None and ctx is None:
-        # Анкета не заполнена — ведём диалог настройки короткими блоками.
-        gen_ctx_raw = db.query(CommunityGenerationContext).filter(
-            CommunityGenerationContext.user_community_id == community.id
-        ).first()
-        answered = 0
-        if gen_ctx_raw is not None:
-            answered = sum(
-                1 for field in (gen_ctx_raw.goal, gen_ctx_raw.community_specifics,
-                                gen_ctx_raw.target_audience,
-                                gen_ctx_raw.current_state_and_what_works,
-                                gen_ctx_raw.image_source_preferences)
-                if (field or "").strip()
-            )
-        next_question_block = (
-            CONTEXT_SETUP_BLOCK_C if answered >= 4
-            else CONTEXT_SETUP_BLOCK_B if answered >= 2
-            else CONTEXT_SETUP_BLOCK_A
-        )
+    elif community is not None:
+        # Анкеты нет — вместо шаблонных вопросов просим заполнить форму
+        # настроек (на фронтенде она открывается автоматически).
         system_prompt = (
             f"{system_prompt}\n\nАнкета сообщества ещё не заполнена. "
-            "Задавай вопросы настройки небольшими блоками (по 1-2 вопроса), "
-            "а не списком из пяти сразу. Следующий ожидаемый блок вопросов:\n"
-            f"{next_question_block}"
+            "НЕ рассылай шаблонные вопросы по пунктам анкеты — попроси "
+            "пользователя заполнить форму настроек сообщества (она открыта "
+            "в интерфейсе) и сохранить её. После сохранения все данные "
+            "поступят тебе автоматически."
         )
 
     # Генерируем ответ через ИИ
@@ -609,118 +674,104 @@ def initialize_chat_with_questions(
     """
     Инициализирует чат с первым сообщением от ИИ-контент-менеджера.
 
-    Логика первого ответа:
-    - Если для сообщества пользователя есть настроенная анкета
-      (CommunityGenerationContext.is_configured == True) и/или историческая
-      аналитика постов (HistoricalPost) — базовые вопросы НЕ задаются.
-      Формируется блок <ANALYTICS>...</ANALYTICS>, передаётся в system_prompt
-      generate_text(), и LLM отвечает по образцу: «Я проанализировал ваше
-      сообщество. Вижу, что лучше всего заходят [...]. Учитывая вашу ЦА [...],
-      я уже подготовил черновик плана. Хотите его посмотреть или скорректируем
-      фокус?».
-    - Если данных нет — задаём вопросы анкеты небольшими диалоговыми блоками
-      (по 1-2 вопроса), а не одним огромным списком.
+    Логика «умного старта»:
+    1. Период берётся из БД по period_id, сообщество пользователя — через
+       _period_user_community(db, period).
+    2. Проверяется CommunityGenerationContext сообщества с is_configured == True.
+    3. Если контекст ЕСТЬ — формируется детерминированное приветствие,
+       резюмирующее данные анкеты («Я проанализировал ваше сообщество. Вижу,
+       что ваша цель: [goal], ЦА: [target_audience]. На основе этого я готов
+       предложить план. Хотите скорректировать вводные или сразу приступим к
+       генерации?»). Базовые вопросы из пунктов анкеты НЕ задаются. Если есть
+       историческая аналитика постов, к резюме добавляется строка о лучших
+       темах.
+    4. Если контекста НЕТ — вместо шаблонных вопросов выдаётся ОДНО компактное
+       сообщение с просьбой заполнить форму настроек (на фронтенде модалка
+       формы открывается автоматически для незаполненных сообществ).
 
     Args:
         db: Сессия базы данных
         period_id: ID периода контент-плана
 
     Returns:
-        str: Приветственное сообщение (вопросы либо аналитическое приветствие)
+        str: Приветственное сообщение (резюме анкеты либо просьба заполнить форму)
     """
+    # Шаг 1: период из БД.
     period = db.query(ContentPlanPeriod).filter(
         ContentPlanPeriod.id == period_id
     ).first()
 
+    # Шаг 2: сообщество пользователя.
     community = _period_user_community(db, period) if period is not None else None
+
+    # Шаг 3: настроенный контекст генерации (is_configured == True).
     ctx = (
         get_configured_generation_context(db, community.id)
         if community is not None
         else None
     )
 
-    # === ВЕТКА 1: данные ЕСТЬ — аналитическое приветствие без базовых вопросов ===
-    # Требование: аналитика учитывается только вместе с заполненной анкетой
-    # (ctx.is_configured == True); голая история постов без ответов пользователя
-    # не заменяет диалог настройки.
-    if period is not None and ctx is not None:
-        top_posts = _top_historical_posts(db, community.group_id)
-        analytics_block = build_analytics_block(db, period)
-        welcome_message = ""
-        try:
-            system_prompt = (
-                "Ты — персональный контент-менеджер и маркетолог. Отвечай обычным "
-                "текстом без HTML.\n\n"
-                + analytics_block
-                + "\n\nПользователь уже заполнил анкету сообщества, и у тебя есть "
-                "его история постов. НЕ задавай базовые вопросы (цель, специфика, "
-                "ЦА, что работает, картинки) — эти данные тебе известны из блока "
-                "ANALYTICS. Ответь коротко (3-5 предложений) примерно так: \"Я "
-                "проанализировал ваше сообщество. Вижу, что лучше всего заходят "
-                "[тема из ANALYTICS]. Учитывая вашу ЦА ([ЦА из ANALYTICS]), я уже "
-                "подготовил черновик плана. Хотите его посмотреть или скорректируем "
-                "фокус?\" — используй реальные темы и цифры из ANALYTICS."
-            )
-            prompt = (
-                f"Период планирования: {period.period_type} "
-                f"({period.start_date.strftime('%d.%m.%Y')} - "
-                f"{period.end_date.strftime('%d.%m.%Y')}). "
-                "Поздоровайся и предложи посмотреть готовый черновик плана."
-            )
-            raw = generate_text(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                use_local=_default_use_local(db),
-            )
-            welcome_message = _strip_html_from_response(raw or "")
-        except Exception as e:  # noqa: BLE001 — при недоступности LLM не роняем создание периода
-            logger.warning(f"LLM-приветствие с аналитикой не получилось ({e}) — используем шаблон")
+    # === ВЕТКА 1: контекст ЕСТЬ — умный старт без базовых вопросов ===
+    if ctx is not None:
+        # Детерминированная резюма анкеты (не зависит от доступности LLM).
+        welcome_message = build_smart_start_message(ctx)
 
-        if not welcome_message:
-            # Fallback-шаблон, если LLM недоступна.
-            best_topic = _post_topic_snippet(top_posts[0]) if top_posts else "ваши форматы"
-            audience = (ctx.target_audience or "ваша аудитория") if ctx is not None else "ваша аудитория"
-            welcome_message = (
-                f"Здравствуйте! Я проанализировал ваше сообщество. Вижу, что лучше "
-                f"всего заходят: «{best_topic}». Учитывая вашу ЦА ({audience}), "
-                "я уже подготовил черновик плана. Хотите его посмотреть или "
-                "скорректируем фокус?"
+        # Опционально: обогащаем резюму реальной аналитикой постов и
+        # предлагаем посмотреть готовый черновик плана.
+        top_posts = _top_historical_posts(db, community.group_id)
+        if top_posts:
+            best_topic = _post_topic_snippet(top_posts[0])
+            welcome_message += (
+                f"\nПо истории постов лучше всего заходят: «{best_topic}»."
             )
+        if period is not None:
+            try:
+                analytics_block = build_analytics_block(db, period)
+                system_prompt = (
+                    "Ты — персональный контент-менеджер и маркетолог. Отвечай "
+                    "обычным текстом без HTML.\n\n"
+                    + analytics_block
+                    + "\n\nПользователь уже заполнил анкету сообщества (см. "
+                    "CONTEXT/ANALYTICS). НЕ задавай базовые вопросы (цель, "
+                    "специфика, ЦА, что работает, картинки) — эти данные тебе "
+                    "известны. Ответь коротко (2-3 предложения): подтверди, что "
+                    "готов предложить план на основе этих данных, и спроси, "
+                    "хочет ли пользователь скорректировать вводные или сразу "
+                    "приступить к генерации."
+                )
+                prompt = (
+                    f"Период планирования: {period.period_type} "
+                    f"({period.start_date.strftime('%d.%m.%Y')} - "
+                    f"{period.end_date.strftime('%d.%m.%Y')}). "
+                    "Это первое сообщение в чате после заполнения анкеты."
+                )
+                enriched = _strip_html_from_response(generate_text(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    use_local=_default_use_local(db),
+                ) or "")
+                # LLM-ответ принимаем только если он действительно резюмирует
+                # известные данные и НЕ содержит шаблонных вопросов анкеты.
+                if enriched and not _looks_like_template_questions(enriched):
+                    welcome_message = enriched + (
+                        "" if not top_posts else
+                        f"\nПо истории постов лучше всего заходят: «{best_topic}»."
+                    )
+            except Exception as e:  # noqa: BLE001 — при недоступности LLM не роняем создание периода
+                logger.warning(
+                    f"LLM-приветствие с аналитикой не получилось ({e}) — "
+                    "используем детерминированную резюму анкеты"
+                )
 
         add_chat_message(db, period_id, "assistant", welcome_message)
         return welcome_message
 
-    # === ВЕТКА 2: данных НЕТ — задаём вопросы по одному/двумя блоками (диалог) ===
-    # ctx здесь гарантированно None (незаполненная/несуществующая анкета),
-    # поэтому берём «сырую» запись напрямую: она может существовать с
-    # is_configured=False и частичными ответами пользователя.
-    raw_ctx = None
-    if community is not None:
-        raw_ctx = db.query(CommunityGenerationContext).filter(
-            CommunityGenerationContext.user_community_id == community.id
-        ).first()
-
-    if raw_ctx is not None:
-        # Анкета существует, но ещё не подтверждена — пользователь уже начал
-        # диалог настройки: следующий по счёту небольшой блок вопросов.
-        answered = sum(
-            1 for field in (raw_ctx.goal, raw_ctx.community_specifics,
-                            raw_ctx.target_audience,
-                            raw_ctx.current_state_and_what_works,
-                            raw_ctx.image_source_preferences)
-            if (field or "").strip()
-        )
-        if answered >= 4:
-            next_block = CONTEXT_SETUP_BLOCK_C
-        elif answered >= 2:
-            next_block = CONTEXT_SETUP_BLOCK_B
-        else:
-            next_block = CONTEXT_SETUP_BLOCK_A
-    else:
-        next_block = CONTEXT_SETUP_BLOCK_A
-
-    add_chat_message(db, period_id, "assistant", next_block)
-    return next_block
+    # === ВЕТКА 2: контекста НЕТ — одно компактное сообщение о форме настроек ===
+    # Шаблонные вопросы из пунктов анкеты больше не рассылаются: на фронтенде
+    # для незаполненного сообщества автоматически открывается модальная форма
+    # настроек (openContextModal()), и просим пользователя заполнить именно её.
+    add_chat_message(db, period_id, "assistant", CONTEXT_SETUP_FORM_MESSAGE)
+    return CONTEXT_SETUP_FORM_MESSAGE
 
 
 def generate_content_plan_from_chat(
