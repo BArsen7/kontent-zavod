@@ -440,14 +440,85 @@ def admin_users_page(  # FIX: Event loop unblocked — синхронный ро
     db: Session = Depends(get_db),
     admin: User = Depends(get_current_admin),
 ):
-    """Панель администратора: список всех пользователей."""
-    users = db.query(User).order_by(User.id.asc()).all()
+    """Панель администратора: список всех пользователей с их тарифными планами.
+
+    LEFT OUTER JOIN с tariff_plans, чтобы видеть название и стоимость тарифа
+    каждого пользователя (или "Не назначен"). Также передаём в шаблон список
+    всех тарифов для динамического dropdown выбора.
+    """
+    rows = (
+        db.query(User, TariffPlan)
+        .outerjoin(TariffPlan, User.tariff_plan_id == TariffPlan.id)
+        .order_by(User.id.asc())
+        .all()
+    )
+    users = [
+        {
+            "id": u.id,
+            "email": u.email,
+            "first_name": u.first_name,
+            "last_name": u.last_name,
+            "is_admin": u.is_admin,
+            "is_blocked": u.is_blocked,
+            "blocked_reason": u.blocked_reason,
+            "blocked_at": u.blocked_at,
+            "created_at": u.created_at,
+            "tariff_plan_id": u.tariff_plan_id,
+            "tariff_name": tp.name if tp else None,
+            "tariff_cost": float(tp.cost) if tp else None,
+        }
+        for u, tp in rows
+    ]
+    tariffs = [
+        _serialize_tariff(p)
+        for p in db.query(TariffPlan).order_by(TariffPlan.cost.asc(), TariffPlan.id.asc()).all()
+    ]
     logger.info(f"[admin] {admin.email}: открыл список пользователей (count={len(users)})")
     return templates.TemplateResponse(
         request=request,
         name="admin_users.html",
-        context={"user": admin, "admin": admin, "users": users},
+        context={"user": admin, "admin": admin, "users": users, "tariffs": tariffs},
     )
+
+
+class SetTariffPayload(BaseModel):
+    tariff_plan_id: Optional[int] = None
+
+
+@app.post("/admin/users/{user_id}/set-tariff")
+def admin_set_user_tariff(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
+    user_id: int,
+    payload: SetTariffPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(get_current_admin),
+) -> Dict[str, Any]:
+    """Назначает (или снимает, если null) тарифный план пользователю."""
+    target_user = db.query(User).filter(User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+
+    plan_name = None
+    if payload.tariff_plan_id is not None:
+        plan = db.query(TariffPlan).filter(TariffPlan.id == payload.tariff_plan_id).first()
+        if plan is None:
+            raise HTTPException(status_code=404, detail="Тарифный план не найден")
+        target_user.tariff_plan_id = plan.id
+        plan_name = plan.name
+    else:
+        target_user.tariff_plan_id = None
+
+    db.commit()
+    logger.info(
+        f"[admin] {admin.email}: пользователь id={user_id} ({target_user.email}) — "
+        f"тариф: {plan_name or 'снят'}"
+    )
+    return {
+        "success": True,
+        "user_id": user_id,
+        "tariff_plan_id": target_user.tariff_plan_id,
+        "tariff_name": plan_name,
+    }
 
 
 @app.post("/admin/users/{user_id}/toggle_admin")

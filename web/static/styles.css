@@ -333,3 +333,71 @@ textarea { resize: vertical; }
 .bg-red-50 { background-color: #fef2f2; }
 .text-red-700 { color: #b91c1c; }
 .border-red-300 { border-color: #fca5a5; }
+
+/* === Админка: колонка "Тарифный план" (admin_users.html) === */
+.tariff-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    font-size: .8rem;
+    font-weight: 600;
+    line-height: 1.2;
+    padding: .3rem .7rem;
+    border-radius: 9999px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: box-shadow .15s ease, transform .15s ease;
+    white-space: nowrap;
+}
+.tariff-badge:hover { box-shadow: 0 1px 4px rgba(0, 0, 0, .15); transform: translateY(-1px); }
+
+/* Премиум-тариф (высокий ценник) — золотой/премиум стиль */
+.tariff-premium {
+    background: linear-gradient(to right, #fef3c7, #fde68a);
+    color: #78350f;
+    border-color: #f59e0b;
+}
+
+/* Базовый тариф — серый */
+.tariff-basic {
+    background: #f3f4f6;
+    color: #374151;
+    border-color: #d1d5db;
+}
+
+/* Не назначен — серый текст + пунктирная рамка */
+.tariff-none {
+    background: transparent;
+    color: #9ca3af;
+    border-style: dashed;
+    border-color: #cbd5e1;
+}
+
+/* Dropdown выбора тарифа (позиционируется JS) */
+.tariff-dropdown {
+    position: absolute;
+    z-index: 60;
+    min-width: 220px;
+    max-width: 300px;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: .5rem;
+    box-shadow: 0 10px 25px rgba(0, 0, 0, .12);
+    overflow: hidden;
+}
+.tariff-dropdown-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: .5rem .75rem;
+    font-size: .85rem;
+    color: #374151;
+    background: #fff;
+    border: none;
+    border-bottom: 1px solid #f3f4f6;
+    cursor: pointer;
+    transition: background .1s ease;
+}
+.tariff-dropdown-item:last-child { border-bottom: none; }
+.tariff-dropdown-item:hover { background: #eff6ff; color: #1d4ed8; }
+.tariff-dropdown-item.is-active { background: #ecfdf5; color: #047857; font-weight: 600; }
