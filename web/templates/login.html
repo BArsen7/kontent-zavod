@@ -10,6 +10,13 @@
 <body class="bg-gray-100 min-h-screen flex items-center justify-center">
     <div class="max-w-md w-full mx-4">
         <div class="bg-white rounded-lg shadow-lg p-8">
+            <!-- FIX (Задача 3): сообщение о причине редиректа (например, при попытке открыть /content-manager без входа) -->
+            {% if message %}
+            <div id="loginNotice" class="mb-6 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800 flex items-start gap-2">
+                <span aria-hidden="true">🔒</span>
+                <span>{{ message }}</span>
+            </div>
+            {% endif %}
             <div class="text-center mb-8">
                 <h1 class="text-3xl font-bold text-gray-800">🍪 Autopilot Content</h1>
                 <p class="text-gray-600 mt-2">Вход в систему</p>
@@ -17,6 +24,8 @@
 
             <!-- Форма входа -->
             <form id="loginForm" action="/auth/login" method="POST" class="space-y-6">
+                <!-- FIX (Задача 3): после успешного входа вернуться на страницу, куда вёл редирект -->
+                <input type="hidden" name="next_url" value="{{ next_url | default('/') }}">
                 <div>
                     <label for="email" class="block text-sm font-medium text-gray-700 mb-1">Email</label>
                     <input 
@@ -47,6 +56,9 @@
                 >
                     Войти
                 </button>
+
+                <!-- FIX (Задача 3): контейнер ошибок формы входа -->
+                <div id="loginError" class="hidden rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-700"></div>
             </form>
 
             <!-- Форма регистрации -->
@@ -118,6 +130,32 @@
     </div>
 
     <script>
+        // FIX (Задача 3): AJAX-вход — показываем ошибку не перезагружая страницу,
+        // при успехе браузер сам проследует 302-редиректу сервера (на next_url).
+        document.getElementById('loginForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            const errorDiv = document.getElementById('loginError');
+            errorDiv.classList.add('hidden');
+            try {
+                const formData = new FormData(this);
+                const response = await fetch('/auth/login', { method: 'POST', body: formData });
+                if (response.ok || response.redirected || response.type === 'opaqueredirect') {
+                    // Сервер ответил 302 с Set-Cookie — переходим (fetch сам разрешит редирект и вернёт redirected=true)
+                    window.location.href = response.url && response.url !== 'about:blank'
+                        ? response.url
+                        : (document.querySelector('input[name="next_url"]')?.value || '/');
+                    return;
+                }
+                let message = 'Ошибка входа';
+                try { message = (await response.json()).detail || message; } catch (err) { /* не-JSON */ }
+                errorDiv.textContent = message;
+                errorDiv.classList.remove('hidden');
+            } catch (error) {
+                errorDiv.textContent = 'Ошибка соединения с сервером';
+                errorDiv.classList.remove('hidden');
+            }
+        });
+    </script>
         // Обработка формы регистрации
         document.getElementById('registerForm').addEventListener('submit', async function(e) {
             e.preventDefault();
