@@ -82,8 +82,12 @@
         <div class="ob-success" id="obSuccess">
             <strong>✅ Сообщество настроено!</strong><br>
             Я заполнил анкету (цель, специфика, ЦА) на основе анализа VK и нашего диалога.
-            Теперь можно переходить к контент-менеджеру.
+            Теперь можно переходить в контент-менеджер.<br>
+            <span class="text-xs opacity-80">ℹ️ Эти настройки можно изменить позже: в контент-менеджере выберите
+            сообщество и нажмите «⚙️ Редактировать настройки» — откроется окно с анкетой (цель, специфика, ЦА,
+            что работает, источники картинок).</span>
             <br><a class="btn-primary" id="obContinue" href="/content-manager">Перейти в контент-менеджер →</a>
+            <div class="text-xs mt-2 opacity-70" id="obSuccessCountdown"></div>
         </div>
 
         <div class="ob-input-row" id="obInputRow">
@@ -223,6 +227,8 @@
         return await resp.json();
     }
 
+    const DONE_REDIRECT_SECONDS = 10;
+
     function showDone(data) {
         stopPolling();
         showParsing(false);
@@ -231,11 +237,32 @@
         progressEl.style.display = 'none';
         inputRow.style.display = 'none';
         successEl.style.display = 'block';
+        const countdownEl = document.getElementById('obSuccessCountdown');
         if (data && data.redirect_url) {
             const target = data.redirect_url + (data.redirect_url.includes('?') ? '&' : '?') + 'onboarded=1';
             document.getElementById('obContinue').href = target;
-            // Короткая пауза для readability — затем сам редирект
-            setTimeout(function () { window.location.href = target; }, 2500);
+            // Пользователь может уйти по кнопке раньше — тогда отменяем авто-редирект
+            let remaining = DONE_REDIRECT_SECONDS;
+            const renderCountdown = function () {
+                countdownEl.textContent =
+                    '⏳ Это окно закроется автоматически через ' + remaining + ' сек. ' +
+                    'Настройки можно будет изменить позже в контент-менеджере («⚙️ Редактировать настройки»).';
+            };
+            renderCountdown();
+            const timer = setInterval(function () {
+                remaining -= 1;
+                if (remaining <= 0) {
+                    clearInterval(timer);
+                    window.location.href = target;
+                    return;
+                }
+                renderCountdown();
+            }, 1000);
+            document.getElementById('obContinue').addEventListener('click', function () {
+                clearInterval(timer);
+            });
+        } else {
+            countdownEl.textContent = '';
         }
     }
 
