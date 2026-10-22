@@ -75,12 +75,14 @@ check("select contains community", "Уютная Пекарня" in html)
 check("buttons UI present in template", "renderButtons" in html and "ob-btn" in html)
 check("parsing indicator present", 'id="obParsing"' in html or "Анализирую" in html)
 check("polling logic present", "parse-status" in html)
+# До выбора сообщества чат пуст: статичное приветствие в чате отсутствует,
+# поле ввода скрыто до нажатия «Анализировать».
+check("no greeting before community selected",
+      "Привет! Я твой ИИ-контент менеджер" not in html and "setInputVisible(false)" in html)
 
-# ШАГ 1: приветствие (пустое сообщение)
-r = client.post("/api/onboarding/chat", json={"message": ""})
-d = r.json()
-check("greeting shown", r.status_code == 200 and d["status"] == "question"
-      and d["reply"].startswith("Привет! Я твой ИИ-контент менеджер"))
+# ШАГ 1: приветствие больше НЕ запрашивается у бэкенда до выбора сообщества —
+# страница с выпадающим списком показывает пустой чат, и консьерж «заговаривает»
+# только после нажатия «Анализировать →» (см. onboarding.html).
 
 # ШАГ 2: выбор сообщества -> запуск парсинга
 r = client.post("/api/onboarding/select-community", json={"community_id": pk})
