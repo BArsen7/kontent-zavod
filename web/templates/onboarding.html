@@ -18,14 +18,29 @@
         .ob-input-row textarea:focus { outline: 2px solid #2563eb33; border-color: #2563eb; }
         .ob-send { background: #2563eb; color: #fff; border: none; border-radius: 8px; padding: .6rem 1.1rem; font-weight: 600; cursor: pointer; transition: background .15s; }
         .ob-send:hover { background: #1d4ed8; }
-        .ob-send:disabled { background: #9ca3af; cursor: not-wait; cursor: wait; }
+        .ob-send:disabled { background: #9ca3af; cursor: wait; }
         .ob-typing { color: #6b7280; font-style: italic; font-size: .85rem; padding-left: .25rem; display: none; }
-        .ob-community-select { margin: 0 1.5rem 1rem; display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: #374151; }
+        .ob-community-select { margin: 0 1.5rem 1rem; display: flex; align-items: center; gap: .5rem; font-size: .85rem; color: #374151; flex-wrap: wrap; }
         .ob-community-select select { border: 1px solid #d1d5db; border-radius: 6px; padding: .3rem .5rem; font: inherit; background:#fff; }
+        .ob-start-btn { background: #2563eb; color: #fff; border: none; border-radius: 6px; padding: .35rem .8rem; font: inherit; font-weight: 600; cursor: pointer; }
+        .ob-start-btn:hover { background: #1d4ed8; }
+        .ob-start-btn:disabled { background: #9ca3af; cursor: not-allowed; }
         .ob-success { margin: 1rem 1.5rem; padding: 1rem 1.25rem; border-radius: 10px; border: 1px solid #10b981; background: #ecfdf5; color: #065f46; display: none; }
         .ob-success a.btn-primary { display: inline-block; margin-top: .75rem; background: #059669; color: #fff; text-decoration: none; padding: .5rem 1rem; border-radius: 8px; font-weight: 600; }
         .ob-skip { text-align: center; padding: .5rem 1.5rem 1rem; font-size: .8rem; }
         .ob-skip a { color: #6b7280; }
+        /* Индикатор фонового анализа сообщества (ШАГ 2) */
+        .ob-parsing { margin: 0 1.5rem; padding: .75rem 1rem; border-radius: 10px; border: 1px solid #bfdbfe; background: #eff6ff; color: #1e40af; font-size: .9rem; display: none; align-items: center; gap: .6rem; }
+        .ob-parsing .ob-spinner { width: 18px; height: 18px; border: 3px solid #bfdbfe; border-top-color: #2563eb; border-radius: 50%; animation: ob-spin 0.9s linear infinite; flex: none; }
+        @keyframes ob-spin { to { transform: rotate(360deg); } }
+        /* Кнопки-подсказки под сообщением AI (ШАГ 4) */
+        .ob-buttons { display: flex; flex-wrap: wrap; gap: .5rem; padding: 0 1.5rem .5rem; }
+        .ob-btn { background: #eef2ff; border: 1px solid #c7d2fe; color: #3730a3; border-radius: 999px; padding: .4rem .9rem; font-size: .85rem; cursor: pointer; transition: all .15s; text-align: left; }
+        .ob-btn:hover { background: #e0e7ff; border-color: #818cf8; }
+        .ob-btn.ob-btn-custom { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
+        .ob-btn.ob-btn-custom:hover { background: #ffedd5; border-color: #fb923c; }
+        /* Прогресс диалога «Вопрос N из M» */
+        .ob-progress { font-size: .75rem; color: #6b7280; padding: 0 1.5rem .25rem; display: none; }
     </style>
 </head>
 <body class="bg-gray-100 min-h-screen">
@@ -35,7 +50,7 @@
             <span style="font-size:1.75rem;">🤖</span>
             <div>
                 <h1>AI-консьерж</h1>
-                <p>Пара коротких вопросов — и я настрою генерацию контента под ваше сообщество</p>
+                <p>Выберите сообщество — я проанализирую его данные и задам вопросы только о том, чего не смог узнать сам</p>
             </div>
         </div>
 
@@ -43,19 +58,28 @@
         <div class="ob-community-select">
             <label for="obCommunity">Настраиваем сообщество:</label>
             <select id="obCommunity">
+                <option value="">— выберите сообщество —</option>
                 {% for c in communities %}
-                <option value="{{ c.id }}">{{ c.group_name }}</option>
+                <option value="{{ c.id }}" {% if c.configured %}data-configured="1"{% endif %}>{{ c.group_name }}{% if c.configured %} (настроено){% endif %}</option>
                 {% endfor %}
             </select>
+            <button type="button" class="ob-start-btn" id="obStartBtn">Анализировать →</button>
         </div>
         {% endif %}
 
+        <div id="obParsing" class="ob-parsing" role="status" aria-live="polite">
+            <span class="ob-spinner" aria-hidden="true"></span>
+            <span id="obParsingText">⏳ Анализирую ваше сообщество ВКонтакте… Это займёт пару секунд.</span>
+        </div>
+
         <div id="obChat" class="ob-chat" aria-live="polite"></div>
+        <div class="ob-buttons" id="obButtons" hidden></div>
+        <div class="ob-progress" id="obProgress"></div>
         <div class="ob-typing" id="obTyping">Консьерж печатает…</div>
 
         <div class="ob-success" id="obSuccess">
             <strong>✅ Сообщество настроено!</strong><br>
-            Я заполнил анкету (цель, специфика, ЦА) на основе нашего диалога.
+            Я заполнил анкету (цель, специфика, ЦА) на основе анализа VK и нашего диалога.
             Теперь можно переходить к контент-менеджеру.
             <br><a class="btn-primary" id="obContinue" href="/content-manager">Перейти в контент-менеджер →</a>
         </div>
@@ -78,9 +102,17 @@
     const typingEl = document.getElementById('obTyping');
     const successEl = document.getElementById('obSuccess');
     const inputRow = document.getElementById('obInputRow');
+    const buttonsEl = document.getElementById('obButtons');
+    const progressEl = document.getElementById('obProgress');
+    const parsingEl = document.getElementById('obParsing');
     const communitySel = document.getElementById('obCommunity');
+    const startBtn = document.getElementById('obStartBtn');
 
-    // Текущее выбранное сообщество (если есть) — контекст сохраняется для него
+    // Таймаут ожидания парсинга (мс): по истечении — fallback на свободный диалог
+    const PARSING_TIMEOUT_MS = {{ parsing_timeout_ms | default(30000) }};
+    let pollTimer = null;
+    let smartActive = false;   // выбрано ли сообщество и запущен ли умный сценарий
+
     function currentCommunityId() {
         return communitySel ? parseInt(communitySel.value, 10) || null : null;
     }
@@ -90,6 +122,7 @@
         const row = document.createElement('div');
         row.className = 'flex ' + (role === 'user' ? 'justify-end' : 'justify-start');
         const bubble = document.createElement('div');
+        bubble.style.whiteSpace = 'pre-wrap';
         bubble.className = 'chat-message-bubble ' + (role === 'user'
             ? 'bg-blue-600 text-white rounded-lg px-4 py-2 max-w-[80%]'
             : 'bg-white border border-gray-200 text-gray-800 rounded-lg px-4 py-2 max-w-[80%] shadow-sm');
@@ -106,12 +139,65 @@
         typingEl.style.display = busy ? 'block' : 'none';
     }
 
+    function showParsing(show, text) {
+        if (!parsingEl) return;
+        parsingEl.style.display = show ? 'flex' : 'none';
+        if (text) {
+            const t = document.getElementById('obParsingText');
+            if (t) t.textContent = text;
+        }
+    }
+
+    // --- ШАГ 4: кнопки-подсказки -------------------------------------------
+    // При клике значение кнопки подставляется в textarea, НО не отправляется:
+    // пользователь может отредактировать текст перед отправкой.
+    function renderButtons(buttonsData, field) {
+        buttonsEl.innerHTML = '';
+        if (!Array.isArray(buttonsData) || buttonsData.length === 0) {
+            buttonsEl.hidden = true;
+            return;
+        }
+        buttonsEl.hidden = false;
+        buttonsData.forEach(function (btn) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'ob-btn' + (btn.custom ? ' ob-btn-custom' : '');
+            b.textContent = btn.label || btn.value || '…';
+            b.addEventListener('click', function () {
+                clearButtons();
+                if (btn.custom) {
+                    inputEl.value = '';
+                    inputEl.placeholder = 'Опишите своими словами…';
+                } else {
+                    inputEl.value = btn.value || '';
+                }
+                inputEl.focus();
+            });
+            buttonsEl.appendChild(b);
+        });
+        buttonsEl.dataset.field = field || '';
+    }
+
+    function clearButtons() {
+        buttonsEl.innerHTML = '';
+        buttonsEl.hidden = true;
+    }
+
+    function renderProgress(progress) {
+        if (progress && typeof progress.index === 'number') {
+            progressEl.textContent = 'Вопрос ' + progress.index + ' из ' + progress.total;
+            progressEl.style.display = 'block';
+        } else {
+            progressEl.style.display = 'none';
+        }
+    }
+
     async function postChat(message) {
         const resp = await fetch('/api/onboarding/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'same-origin',
-            body: JSON.stringify({ message: message || '', community_id: currentCommunityId() })
+            body: JSON.stringify({ message: message || '' })
         });
         if (!resp.ok) {
             let detail = 'Ошибка сервера';
@@ -122,6 +208,10 @@
     }
 
     function showDone(data) {
+        stopPolling();
+        showParsing(false);
+        clearButtons();
+        progressEl.style.display = 'none';
         inputRow.style.display = 'none';
         successEl.style.display = 'block';
         if (data && data.redirect_url) {
@@ -132,25 +222,145 @@
         }
     }
 
+    // Обработка ответа API: question (с кнопками) / parsing / configured
+    function handleChatResponse(data) {
+        if (data.status === 'configured') {
+            appendBubble('assistant', data.reply || 'Готово! Контекст сохранён.');
+            showDone(data);
+            return;
+        }
+        if (data.status === 'parsing') {
+            showParsing(true);
+            startPolling(data.parsing_task_id);
+            return;
+        }
+        // status === "question"
+        appendBubble('assistant', data.reply || 'Хм, не получил ответа. Попробуйте ещё раз.');
+        renderButtons(data.buttons, data.field);
+        renderProgress(data.progress);
+    }
+
     async function sendMessage() {
         const text = (inputEl.value || '').trim();
         if (!text) return;
         inputEl.value = '';
+        clearButtons();
         appendBubble('user', text);
         setBusy(true);
         try {
             const data = await postChat(text);
-            if (data.status === 'configured') {
-                appendBubble('assistant', data.reply || 'Готово! Контекст сохранён.');
-                showDone(data);
-            } else {
-                appendBubble('assistant', data.reply || 'Хм, не получил ответа. Попробуйте ещё раз.');
-            }
+            handleChatResponse(data);
         } catch (err) {
             appendBubble('assistant', '⚠️ ' + err.message);
         } finally {
             setBusy(false);
+            showParsing(false);
             inputEl.focus();
+        }
+    }
+
+    // --- ШАГ 2: запуск фонового парсинга выбранного сообщества -------------
+    async function startAnalysis() {
+        const cid = currentCommunityId();
+        if (!cid) return;
+        stopPolling();
+        clearButtons();
+        progressEl.style.display = 'none';
+        chatEl.innerHTML = '';
+        setBusy(true);
+        if (startBtn) startBtn.disabled = true;
+        try {
+            const resp = await fetch('/api/onboarding/select-community', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ community_id: cid })
+            });
+            if (!resp.ok) {
+                let detail = 'Не удалось начать анализ';
+                try { detail = (await resp.json()).detail || detail; } catch (e) { /* ignore */ }
+                throw new Error(detail);
+            }
+            const data = await resp.json();
+            smartActive = true;
+            if (data.status === 'done') {
+                // Данные уже были в кэше — сразу переходим к вопросам
+                showParsing(false);
+                await continueAfterParse();
+            } else {
+                showParsing(true, data.message || '⏳ Анализирую ваше сообщество ВКонтакте…');
+                startPolling(data.task_id);
+            }
+        } catch (err) {
+            appendBubble('assistant', '⚠️ ' + err.message + ' Перехожу к обычному диалогу — расскажите о сообществе своими словами.');
+            smartActive = false;
+            await greetFallback();
+        } finally {
+            setBusy(false);
+            if (startBtn) startBtn.disabled = false;
+        }
+    }
+
+    // После завершения парсинга — задать первый вопрос (пустое сообщение)
+    async function continueAfterParse() {
+        setBusy(true);
+        try {
+            const data = await postChat('');
+            handleChatResponse(data);
+        } catch (err) {
+            appendBubble('assistant', '⚠️ ' + err.message);
+        } finally {
+            setBusy(false);
+            showParsing(false);
+            inputEl.focus();
+        }
+    }
+
+    // --- Polling статуса парсинга ------------------------------------------
+    function stopPolling() {
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    function startPolling(taskId) {
+        stopPolling();
+        if (!taskId) return;
+        const startedAt = Date.now();
+        pollTimer = setInterval(async function () {
+            // Fallback: если парсинг не завершился за отведённое время —
+            // скрываем индикатор и продолжаем обычный текстовый диалог.
+            if (Date.now() - startedAt > PARSING_TIMEOUT_MS) {
+                stopPolling();
+                showParsing(false);
+                appendBubble('assistant', 'Похоже, анализ занял слишком долго. Давай поговорим как обычно — расскажи немного о сообществе!');
+                return;
+            }
+            try {
+                const resp = await fetch('/api/onboarding/parse-status/' + encodeURIComponent(taskId), {
+                    credentials: 'same-origin'
+                });
+                if (!resp.ok) return; // 404 — задача устарела, ждём шаг чата
+                const st = await resp.json();
+                if (st.parsed_status === 'done' || st.parsed_status === 'error') {
+                    stopPolling();
+                    showParsing(false);
+                    if (st.parsed_status === 'error') {
+                        appendBubble('assistant', 'Не удалось полностью проанализировать сообщество (' + (st.error || 'ошибка данных') + '). Задам пару коротких вопросов.');
+                    }
+                    await continueAfterParse();
+                }
+            } catch (e) { /* network hiccup — попробуем на следующем тике */ }
+        }, 1500);
+    }
+
+    // Стартовое приветствие (ШАГ 1). Если есть список сообществ — просим выбрать.
+    async function greetFallback() {
+        try {
+            const data = await postChat('');
+            if (data.status === 'configured') { showDone(data); return; }
+            appendBubble('assistant', data.reply);
+            renderButtons(data.buttons, data.field);
+        } catch (err) {
+            appendBubble('assistant', '⚠️ Не удалось начать диалог: ' + err.message);
         }
     }
 
@@ -163,13 +373,31 @@
     });
     sendBtn.addEventListener('click', sendMessage);
 
-    // Стартовое приветствие консьержа (первый вызов с пустым сообщением)
+    if (startBtn) startBtn.addEventListener('click', startAnalysis);
+    if (communitySel) {
+        communitySel.addEventListener('change', function () {
+            clearButtons();
+            progressEl.style.display = 'none';
+            smartActive = false;
+            stopPolling();
+            showParsing(false);
+        });
+    }
+
+    // Инициализация: greeting нового сценария (выбор сообщества) или старый
+    // свободный диалог, если сообществ ещё нет.
     (async function init() {
+        if (communitySel && communitySel.options.length > 1) {
+            appendBubble('assistant',
+                'Привет! Я твой ИИ-контент менеджер 🤖 Выбери сообщество из списка выше и нажми «Анализировать» — ' +
+                'я автоматически проанализирую его данные ВКонтакте и свою базу знаний, а задам вопросы только о том, ' +
+                'что не смог узнать сам.');
+            return;
+        }
         setBusy(true);
         try {
             const data = await postChat('');
-            appendBubble('assistant', data.reply);
-            if (data.status === 'configured') showDone(data);
+            handleChatResponse(data);
         } catch (err) {
             appendBubble('assistant', '⚠️ Не удалось начать диалог: ' + err.message);
         } finally {

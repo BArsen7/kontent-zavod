@@ -363,8 +363,22 @@ def _answer_matches_field(field: str, answer: str) -> bool:
 
 
 def _has_meaningful_answer(state: Dict[str, Any], field: str) -> bool:
-    """Есть ли в диалоге осмысленный ответ по полю (не клик по кнопке
-    «Свой вариант…» и не одно слово-паразит)."""
+    """Есть ли осмысленный ответ по полю: детерминированный черновик из
+    умного диалога (record_answer) либо внятная реплика в свободном диалоге
+    (не клик по кнопке «Свой вариант…» и не одно слово-паразит)."""
+    draft_key = {
+        "goal": "goal",
+        "specifics": "specifics",
+        "current_state": "current_state",
+        "image_preferences": "image_source_preferences",
+    }.get(field)
+    if draft_key is not None:
+        value = (state.get("answers_draft") or {}).get(draft_key)
+        if isinstance(value, (list, tuple)):
+            if any(str(v).strip() for v in value):
+                return True
+        elif str(value or "").strip():
+            return True
     messages = state.get("messages", [])
     last_q_idx = -1
     for i in range(len(messages) - 1, -1, -1):
@@ -1255,10 +1269,6 @@ def run_onboarding_turn(
 
     # --- Умный режим: вопросы по недостающим полям с кнопками ---
     if state.get("smart_mode"):
-        if message:
-            record_answer(state, message)
-            messages.append({"role": "user", "content": message})
-
         pending_task = state.get("task_id")
         if pending_task:
             task = parse_task_store.get(pending_task)
@@ -1270,6 +1280,10 @@ def run_onboarding_turn(
                 }
             state["task_id"] = None
             apply_task_result_to_state(state, task)
+
+        if message:
+            record_answer(state, message)
+            messages.append({"role": "user", "content": message})
 
         missing = missing_onboarding_fields(state.get("parsed_data"), state)
         if not missing:
