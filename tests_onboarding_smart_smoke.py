@@ -65,6 +65,7 @@ uc = models.UserCommunity(user_id=u.id, group_id=-123456, group_name="Уютна
                           group_token="tok-test", is_admin=True, can_post=True)
 sess.add(uc); sess.commit(); sess.refresh(uc)
 pk = uc.id
+user_id = u.id
 sess.close()
 
 # GET /onboarding — страница с выпадающим списком сообществ
@@ -91,16 +92,24 @@ check("select-community accepted", r.status_code == 200 and d.get("task_id"))
 check("select-community returns name", d.get("community_name") == "Уютная Пекарня")
 task_id = d["task_id"]
 
-# Polling статуса парсинга
-r = client.post("/api/onboarding/chat", json={"message": ""})
-if r.json().get("status") == "parsing":
-    task_id = r.json()["parsing_task_id"]
-    rr = client.get(f"/api/onboarding/parse-status/{task_id}")
-    check("parse-status endpoint works", rr.status_code == 200 and rr.json()["parsed_status"] in ("done", "error", "parsing"))
-
-# Следующий шаг чата должен дать вопрос с кнопками (умный режим)
+# Polling статуса парсинга (первый же чат-шаг возвращает parsing + task_id)
 r = client.post("/api/onboarding/chat", json={"message": ""})
 d = r.json()
+if d.get("status") == "parsing":
+    task_id = d["parsing_task_id"]
+    rr = client.get(f"/api/onboarding/parse-status/{task_id}")
+    check("parse-status endpoint works", rr.status_code == 200 and rr.json()["parsed_status"] in ("done", "error", "parsing"))
+    # Ждём завершения парсинга и запрашиваем первый вопрос
+    deadline = 50
+    while deadline > 0:
+        st = client.get(f"/api/onboarding/parse-status/{task_id}").json()
+        if st["parsed_status"] in ("done", "error"):
+            break
+        import time; time.sleep(0.1); deadline -= 1
+    r = client.post("/api/onboarding/chat", json={"message": ""})
+    d = r.json()
+
+# Первый вопрос умного режима — с кнопками (умный режим)
 check("smart mode question with buttons", d["status"] == "question" and isinstance(d.get("buttons"), list) and len(d["buttons"]) >= 4)
 check("question targets goal field", d.get("field") == "goal")
 check("progress indicator present", isinstance(d.get("progress"), dict) and d["progress"]["index"] == 1)
@@ -157,7 +166,7 @@ def broken_info(token, group_id, fields=""):
 vka.get_group_info = broken_info
 vka.import_history = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no wall access"))
 sess = database.SessionLocal()
-uc2 = models.UserCommunity(user_id=u.id, group_id=-999, group_name="Новое Сообщество",
+uc2 = models.UserCommunity(user_id=user_id, group_id=-999, group_name="Новое Сообщество",
                            group_token="tok2", is_admin=True, can_post=True)
 sess.add(uc2); sess.commit(); sess.refresh(uc2)
 pk2 = uc2.id
