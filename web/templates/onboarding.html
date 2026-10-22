@@ -113,6 +113,15 @@
     let pollTimer = null;
     let smartActive = false;   // выбрано ли сообщество и запущен ли умный сценарий
 
+    // До выбора сообщества чат пуст: скрываем поле ввода, чтобы консьерж
+    // «заговорил» только после нажатия «Анализировать →» (ШАГ 1 → ШАГ 2).
+    function setInputVisible(visible) {
+        inputRow.style.display = visible ? 'flex' : 'none';
+    }
+    if (communitySel && communitySel.options.length > 1) {
+        setInputVisible(false);
+    }
+
     function currentCommunityId() {
         return communitySel ? parseInt(communitySel.value, 10) || null : null;
     }
@@ -267,6 +276,7 @@
         clearButtons();
         progressEl.style.display = 'none';
         chatEl.innerHTML = '';
+        setInputVisible(true);   // диалог начинается только после выбора сообщества
         setBusy(true);
         if (startBtn) startBtn.disabled = true;
         try {
@@ -381,19 +391,22 @@
             smartActive = false;
             stopPolling();
             showParsing(false);
+            // Пока сообщество не выбрано — чат пуст и поле ввода скрыто.
+            if (!currentCommunityId()) {
+                chatEl.innerHTML = '';
+                setInputVisible(false);
+            }
         });
     }
 
-    // Инициализация: greeting нового сценария (выбор сообщества) или старый
-    // свободный диалог, если сообществ ещё нет.
+    // Инициализация: если есть список сообществ — стартовый экран БЕЗ
+    // сообщений в чате (консьерж заговорит только после выбора сообщества).
+    // Если сообществ ещё нет — сразу начинаем свободный диалог.
     (async function init() {
         if (communitySel && communitySel.options.length > 1) {
-            appendBubble('assistant',
-                'Привет! Я твой ИИ-контент менеджер 🤖 Выбери сообщество из списка выше и нажми «Анализировать» — ' +
-                'я автоматически проанализирую его данные ВКонтакте и свою базу знаний, а задам вопросы только о том, ' +
-                'что не смог узнать сам.');
             return;
         }
+        setInputVisible(true);
         setBusy(true);
         try {
             const data = await postChat('');
