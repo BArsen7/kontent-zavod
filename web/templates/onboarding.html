@@ -39,6 +39,8 @@
         .ob-btn:hover { background: #e0e7ff; border-color: #818cf8; }
         .ob-btn.ob-btn-custom { background: #fff7ed; border-color: #fed7aa; color: #9a3412; }
         .ob-btn.ob-btn-custom:hover { background: #ffedd5; border-color: #fb923c; }
+        .ob-btn.ob-btn-active { background: #4f46e5; border-color: #4f46e5; color: #fff; font-weight: 600; }
+        .ob-btn.ob-btn-custom.ob-btn-active { background: #ea580c; border-color: #ea580c; color: #fff; font-weight: 600; }
         /* Прогресс диалога «Вопрос N из M» */
         .ob-progress { font-size: .75rem; color: #6b7280; padding: 0 1.5rem .25rem; display: none; }
     </style>
@@ -173,7 +175,12 @@
             b.className = 'ob-btn' + (btn.custom ? ' ob-btn-custom' : '');
             b.textContent = btn.label || btn.value || '…';
             b.addEventListener('click', function () {
-                clearButtons();
+                // Кнопки НЕ исчезают: текст в textarea просто заменяется на
+                // значение кнопки — пользователь может отредактировать и отправить.
+                buttonsEl.querySelectorAll('.ob-btn').forEach(function (el) {
+                    el.classList.remove('ob-btn-active');
+                });
+                b.classList.add('ob-btn-active');
                 if (btn.custom) {
                     inputEl.value = '';
                     inputEl.placeholder = 'Опишите своими словами…';
@@ -220,6 +227,7 @@
         stopPolling();
         showParsing(false);
         clearButtons();
+        try { localStorage.removeItem('obCommunityId'); } catch (e) { /* ignore */ }
         progressEl.style.display = 'none';
         inputRow.style.display = 'none';
         successEl.style.display = 'block';
@@ -253,7 +261,11 @@
         const text = (inputEl.value || '').trim();
         if (!text) return;
         inputEl.value = '';
-        clearButtons();
+        // Кнопки НЕ удаляем здесь: их скрывает только renderButtons() при
+        // получении нового вопроса или showDone()/сброс выбора сообщества.
+        // Это позволяет пользователю вернуться к вариантам ответа, если он
+        // передумал и хочет выбрать другую кнопку (текст в textarea при этом
+        // заменяется на значение нажатой кнопки).
         appendBubble('user', text);
         setBusy(true);
         try {
@@ -276,6 +288,7 @@
         clearButtons();
         progressEl.style.display = 'none';
         chatEl.innerHTML = '';
+        try { localStorage.setItem('obCommunityId', String(cid)); } catch (e) { /* ignore */ }
         setInputVisible(true);   // диалог начинается только после выбора сообщества
         setBusy(true);
         if (startBtn) startBtn.disabled = true;
@@ -374,6 +387,19 @@
         }
     }
 
+    // Восстановление кнопок после перезагрузки страницы: пустое сообщение
+    // возвращает текущий (или первый) вопрос с кнопками без «съедания» шага.
+    async function restoreLastQuestion() {
+        setBusy(true);
+        try {
+            const data = await postChat('');
+            handleChatResponse(data);
+        } catch (err) { /* сервер недоступен — пользователь начнёт заново */ }
+        finally {
+            setBusy(false);
+        }
+    }
+
     // Enter — отправить, Shift+Enter — перенос строки (как в основном чате)
     inputEl.addEventListener('keydown', function (e) {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -395,15 +421,29 @@
             if (!currentCommunityId()) {
                 chatEl.innerHTML = '';
                 setInputVisible(false);
+                try { localStorage.removeItem('obCommunityId'); } catch (e) { /* ignore */ }
             }
         });
     }
 
     // Инициализация: если есть список сообществ — стартовый экран БЕЗ
     // сообщений в чате (консьерж заговорит только после выбора сообщества).
+    // Если умный диалог уже начат на сервере (перезагрузка страницы) —
+    // восстанавливаем текущий вопрос с кнопками.
     // Если сообществ ещё нет — сразу начинаем свободный диалог.
     (async function init() {
         if (communitySel && communitySel.options.length > 1) {
+            const savedCid = parseInt(localStorage.getItem('obCommunityId'), 10) || 0;
+            if (savedCid) {
+                for (let i = 0; i < communitySel.options.length; i++) {
+                    if (parseInt(communitySel.options[i].value, 10) === savedCid) {
+                        communitySel.selectedIndex = i;
+                        break;
+                    }
+                }
+                setInputVisible(true);
+                await restoreLastQuestion();
+            }
             return;
         }
         setInputVisible(true);

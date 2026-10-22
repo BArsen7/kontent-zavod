@@ -74,6 +74,11 @@ html = r.text
 check("page renders with community select", r.status_code == 200 and 'id="obCommunity"' in html)
 check("select contains community", "Уютная Пекарня" in html)
 check("buttons UI present in template", "renderButtons" in html and "ob-btn" in html)
+# При клике на кнопку значения НЕ очищаются: кнопки остаются видимыми,
+# текст в textarea заменяется на значение кнопки (можно редактировать).
+check("button click keeps buttons visible (no clearButtons on click)",
+      "clearButtons();\n                if (btn.custom)" not in html
+      and "ob-btn-active" in html)
 check("parsing indicator present", 'id="obParsing"' in html or "Анализирую" in html)
 check("polling logic present", "parse-status" in html)
 # До выбора сообщества чат пуст: статичное приветствие в чате отсутствует,

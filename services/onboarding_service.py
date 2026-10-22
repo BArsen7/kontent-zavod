@@ -596,6 +596,57 @@ def record_answer(state: Dict[str, Any], message: str) -> None:
     state.setdefault("asked_fields", {})[current_field] = True
 
 
+def reassign_answer_to_matching_field(state: Dict[str, Any], message: str) -> None:
+    """Если ответ пользователя матчится с кнопками другого ещё не отвеченного
+    поля — переключаем текущий вопрос на это поле.
+
+    Ситуация: кнопки текущего вопроса остаются видимыми после отправки
+    ответа; пользователь мог нажать кнопку следующего вопроса и отправить
+    её значение раньше времени. Без переключения такой ответ был бы
+    записан в неверное поле.
+    """
+    asked = state.get("asked_fields") or {}
+    current = state.get("current_question_field")
+    if not current:
+        return
+    norm_msg = _norm(message)
+    if not norm_msg:
+        return
+    # 1) Точное совпадение со значением/подписью кнопки другого поля —
+    # пользователь явно нажал кнопку следующего вопроса.
+    for field in QUESTION_FIELDS:
+        if field == current or asked.get(field):
+            continue
+        buttons = BUTTONS_BY_FIELD.get(field) or []
+        matched = any(
+            norm_msg == _norm(btn["value"])
+            or (btn.get("label") and norm_msg == _norm(btn["label"]))
+            for btn in buttons
+        )
+        if matched:
+            state["current_question_field"] = field
+            return
+    # 2) Подстрочное совпадение — но только если реплика НЕ матчится с
+    # кнопками текущего поля (иначе это отредактированный ответ на текущий
+    # вопрос, и переключать поле нельзя).
+    if _find_button_match(current, message) is not None:
+        return
+    for field in QUESTION_FIELDS:
+        if field == current or asked.get(field):
+            continue
+        buttons = BUTTONS_BY_FIELD.get(field) or []
+        matched = any(
+            (_norm(btn["value"]) and _norm(btn["value"]) in norm_msg)
+            or (btn.get("label") and _norm(btn["label"]) in norm_msg)
+            for btn in buttons
+        )
+        if field == "image_preferences" and not matched:
+            matched = bool(parse_image_sources(message))
+        if matched:
+            state["current_question_field"] = field
+            return
+
+
 # --- Фоновый парсинг данных сообщества -------------------------------------
 
 
@@ -1287,6 +1338,12 @@ def run_onboarding_turn(
             state["task_id"] = None
             apply_task_result_to_state(state, task)
 
+        # Пользователь мог нажать другую кнопку и отправить отредактированный
+        # ответ, не дожидаясь нового вопроса: если реплика матчится с кнопками
+        # другого ещё не отвеченного поля — переключаемся на это поле.
+        if message:
+            reassign_answer_to_matching_field(state, message)
+
         if message:
             record_answer(state, message)
             messages.append({"role": "user", "content": message})
@@ -1294,6 +1351,18 @@ def run_onboarding_turn(
         missing = missing_onboarding_fields(state.get("parsed_data"), state)
         if not missing:
             return finalize_smart_onboarding(db, state, use_local=use_local)
+
+        current_field = state.get("current_question_field")
+        if (
+            not message
+            and current_field
+            and current_field in missing
+            and state.get("last_question_payload")
+        ):
+            # Повторный запрос текущего вопроса (например, после отправки
+            # ответа, который не был засчитан): возвращаем тот же вопрос с
+            # теми же кнопками — без «съедания» шага прогресса.
+            return dict(state["last_question_payload"])
 
         asked = state.get("asked_fields") or {}
         field = missing[0]
@@ -1309,7 +1378,9 @@ def run_onboarding_turn(
         state["current_question_field"] = step["field"]
         meta = {"field": step["field"], "buttons": step["buttons"]}
         messages.append({"role": "assistant", "content": step["question"], "meta": meta})
-        return _question_payload(step)
+        payload = _question_payload(step)
+        state["last_question_payload"] = payload
+        return payload
 
     # --- Обычный режим (fallback-диалог) ---
     if not messages:
