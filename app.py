@@ -119,12 +119,21 @@ from services.tariff_service import (
 import re as _re  # валидация имени сообщества из диалога консьержа
 from services.onboarding_service import (
     ONBOARDING_GREETING,
+    PARSING_MESSAGE,
+    PARSING_TIMEOUT_MS,
     MIN_USER_TURNS_FOR_EXTRACTION,
     onboarding_store,
+    parse_task_store,
     concierge_reply,
     extract_onboarding_data,
     save_onboarding_context,
     needs_onboarding,
+    ensure_platform_account,
+    collect_known_data,
+    apply_parsed_to_state,
+    apply_task_result_to_state,
+    run_parse_task,
+    run_onboarding_turn,
 )
 from managers.community_manager import CommunityManager
 from vk_errors import create_vk_session, describe_api_error, positive_group_id
@@ -2419,6 +2428,12 @@ class OnboardingChatRequest(BaseModel):
     reset: bool = False                    # начать диалог заново
 
 
+class OnboardingSelectRequest(BaseModel):
+    """Тело запроса выбора сообщества для настройки (/api/onboarding/select-community)."""
+
+    community_id: int                      # UserCommunity.id
+
+
 def _onboarding_finish(db: Session, user: User, state: dict) -> Dict[str, Any]:
     """Финализация онбординга: извлечение данных LLM + сохранение контекста.
 
@@ -2429,8 +2444,9 @@ def _onboarding_finish(db: Session, user: User, state: dict) -> Dict[str, Any]:
 
     dialog = list(state["messages"])
     use_local = _default_use_local(db)
+    parsed_data = state.get("parsed_data") or {}
 
-    extracted = extract_onboarding_data(dialog, use_local=use_local) or {}
+    extracted = extract_onboarding_data(dialog, use_local=use_local, parsed_data=parsed_data) or {}
     if extracted.get("community_name"):
         extracted.setdefault("specifics", extracted.get("community_name"))
 
@@ -2455,7 +2471,7 @@ def _onboarding_finish(db: Session, user: User, state: dict) -> Dict[str, Any]:
         db.refresh(placeholder)
         target_community_id = placeholder.id
 
-    ctx = save_onboarding_context(db, target_community_id, extracted)
+    ctx = save_onboarding_context(db, target_community_id, extracted, parsed_data=parsed_data)
 
     onboarding_store.reset(user.id)
     return {
@@ -2465,11 +2481,153 @@ def _onboarding_finish(db: Session, user: User, state: dict) -> Dict[str, Any]:
             "goal": ctx.goal,
             "community_specifics": ctx.community_specifics,
             "target_audience": ctx.target_audience,
+            "current_state_and_what_works": ctx.current_state_and_what_works,
+            "image_source_preferences": ctx.image_source_preferences,
             "is_configured": ctx.is_configured,
         },
         "community_id": target_community_id,
         "redirect_url": "/content-manager?onboarded=1",
     }
+
+
+def _task_public_view(task: Dict[str, Any]) -> Dict[str, Any]:
+    """Публичное представление фоновой задачи парсинга для API."""
+    data = task.get("data") or {}
+    return {
+        "parsed_status": task["status"],
+        "error": task.get("error"),
+        "community_name": data.get("community_name"),
+        "has_data": bool(
+            data.get("community_description")
+            or data.get("target_audience")
+            or data.get("usp")
+            or data.get("tone_of_voice")
+            or data.get("insights_summary")
+            or data.get("rubrics")
+        ),
+    }
+
+
+@app.post("/api/onboarding/select-community")
+async def onboarding_select_community(
+    payload: OnboardingSelectRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """ШАГ 2: выбор сообщества для настройки + запуск фонового парсинга.
+
+    Автоматически собирает данные о сообществе: описание из VK
+    (groups.getById fields="description"), исторические посты (wall.get ->
+    HistoricalPost), AI-паспорт CommunityContext
+    (context_strategy_service.build_community_context: аудитория, tone of
+    voice, УТП, инсайты по топ/провальным постам) и рубрики/контент-столпы
+    из MarketingStrategy (внутренняя база знаний).
+
+    Кэширование: если CommunityContext уже существует — не пересобирается.
+    Все сетевые/LLM вызовы выполняются в отдельном потоке (event loop не
+    блокируется); фронтенд опрашивает /api/onboarding/parse-status/{task_id}.
+
+    Returns: {"status": "parsing"|"done", "task_id", "community_name", ...}
+    """
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+    if getattr(user, "is_blocked", False):
+        raise HTTPException(status_code=403, detail="Аккаунт заблокирован")
+
+    uc = await asyncio.to_thread(_get_owned_user_community, db, user, payload.community_id)
+
+    state = onboarding_store.ensure(user.id)
+    state["community_id"] = uc.id
+    state["messages"] = []               # новый диалог по выбранному сообществу
+    state["done"] = False
+    for key in ("smart_mode", "parsed_data", "answers_draft", "asked_fields",
+                "current_question_field", "existing_context"):
+        state.pop(key, None)
+
+    existing_ctx = await asyncio.to_thread(
+        lambda: db.query(CommunityGenerationContext).filter(
+            CommunityGenerationContext.user_community_id == uc.id
+        ).first()
+    )
+    if existing_ctx is not None and existing_ctx.is_configured:
+        state["existing_context"] = {
+            "goal": existing_ctx.goal,
+            "specifics": existing_ctx.community_specifics,
+            "current_state": existing_ctx.current_state_and_what_works,
+            "image_preferences": existing_ctx.image_source_preferences,
+        }
+
+    use_local = await asyncio.to_thread(_default_use_local_safe, db)
+    task = parse_task_store.create(user.id, uc.id)
+    task_id = task["task_id"]
+    state["task_id"] = task_id
+
+    # Быстрый путь: если данные уже есть в БД без сетевых вызовов (кэш),
+    # завершаем задачу сразу — фронтенд получит status="done".
+    try:
+        account_id = await asyncio.to_thread(ensure_platform_account, db, uc)
+        if account_id is not None:
+            known = await asyncio.to_thread(collect_known_data, db, uc, account_id)
+            has_passport = bool(
+                known.get("target_audience") or known.get("usp") or known.get("tone_of_voice")
+            )
+            if has_passport or known.get("rubrics") or known.get("community_description"):
+                parse_task_store.finish(task_id, known)
+    except Exception as e:  # noqa: BLE001 — быстрый путь опционален
+        logger.warning(f"[onboarding] Быстрый сбор данных не удался: {type(e).__name__}: {e}")
+
+    fresh_task = parse_task_store.get(task_id) or task
+    if fresh_task["status"] != "parsing":
+        apply_parsed_to_state(state, fresh_task.get("data"))
+        return {
+            "status": "done",
+            "task_id": task_id,
+            "community_name": uc.group_name or f"Сообщество {uc.group_id}",
+            **_task_public_view(fresh_task),
+        }
+
+    # Полный фоновый парсинг (VK API + LLM) в отдельном потоке.
+    threading.Thread(
+        target=run_parse_task,
+        args=(task_id, user.id, uc.id, use_local),
+        daemon=True,
+        name=f"onboarding-parse-{task_id[:8]}",
+    ).start()
+
+    return {
+        "status": "parsing",
+        "task_id": task_id,
+        "community_name": uc.group_name or f"Сообщество {uc.group_id}",
+        "timeout_ms": PARSING_TIMEOUT_MS,
+        "message": PARSING_MESSAGE,
+        **_task_public_view(task),
+    }
+
+
+@app.get("/api/onboarding/parse-status/{task_id}")
+def onboarding_parse_status(  # синхронный роут — выполняется в threadpool FastAPI
+    task_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Статус фоновой задачи парсинга сообщества (polling с фронтенда)."""
+    user = get_current_user(request, db)
+    if not user:
+        raise HTTPException(status_code=401, detail="Требуется авторизация")
+    task = parse_task_store.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="Задача парсинга не найдена или устарела")
+    if task["user_id"] != user.id and not getattr(user, "is_admin", False):
+        raise HTTPException(status_code=403, detail="Задача принадлежит другому пользователю")
+
+    if task["status"] in ("done", "error"):
+        state = onboarding_store.ensure(user.id)
+        if not state.get("smart_mode") and state.get("task_id") == task_id:
+            state["task_id"] = None
+            apply_task_result_to_state(state, task)
+
+    return {"task_id": task_id, **_task_public_view(task)}
 
 
 @app.post("/api/onboarding/chat")
@@ -2480,12 +2638,15 @@ async def onboarding_chat(
 ) -> Dict[str, Any]:
     """Шаг диалога с AI-консьержем для настройки сообщества (онбординг).
 
-    - Первый вызов (message пуст) -> приветствие консьержа.
-    - Далее LLM задаёт короткие вопросы; когда ответов достаточно
-      (DONE или >= MIN_USER_TURNS_FOR_EXTRACTION реплик пользователя),
-      выполняется отдельный вызов LLM-извлечения JSON (goal/specifics/
-      audience) и сохранение в CommunityGenerationContext с
-      is_configured=True.
+    Новый сценарий (после /api/onboarding/select-community): консьерж задаёт
+    вопросы ТОЛЬКО по недостающим полям (цель, специфика, текущий контент,
+    картинки) с кнопками-подсказками; ответы сохраняются в
+    CommunityGenerationContext (is_configured=True), при отсутствии
+    AI-паспорт CommunityContext создаётся из собранных данных, затем
+    редирект на /content-manager?onboarded=1.
+
+    Fallback: если сообщество не выбрано или парсинг не дал данных —
+    обычный свободный текстовый диалог с извлечением JSON (как раньше).
 
     Синхронные обращения к БД и LLM вынесены в asyncio.to_thread, чтобы
     не блокировать event loop FastAPI.
@@ -2500,7 +2661,7 @@ async def onboarding_chat(
         await asyncio.to_thread(onboarding_store.reset, user.id)
 
     state = onboarding_store.ensure(user.id)
-    if payload.community_id:
+    if payload.community_id and not state.get("community_id"):
         # Проверяем принадлежность сообщества пользователю
         owns = await asyncio.to_thread(
             lambda: db.query(UserCommunity).filter(
@@ -2514,6 +2675,33 @@ async def onboarding_chat(
 
     message = (payload.message or "").strip()[:2000]
 
+    # Если задача парсинга уже завершилась — применяем результат до шага диалога.
+    task_id = state.get("task_id")
+    if task_id:
+        task = parse_task_store.get(task_id)
+        if task is None:
+            state["task_id"] = None
+        elif task.get("status") in ("done", "error"):
+            state["task_id"] = None
+            apply_task_result_to_state(state, task)
+
+    use_local = await asyncio.to_thread(_default_use_local_safe, db)
+
+    # Умный режим: детерминированные вопросы с кнопками по недостающим полям.
+    if state.get("smart_mode"):
+        result = await asyncio.to_thread(run_onboarding_turn, db, state, message, use_local)
+        if result.get("status") == "configured":
+            onboarding_store.reset(user.id)
+        response: Dict[str, Any] = {
+            "status": result.get("status", "question"),
+            "reply": result.get("reply", ""),
+        }
+        for key in ("buttons", "field", "progress", "context", "redirect_url", "parsing_task_id"):
+            if result.get(key) is not None:
+                response[key] = result[key]
+        return response
+
+    # --- Fallback: обычный свободный диалог (прежняя логика) ---
     # Приветствие (первый шаг диалога)
     if not message and not state["messages"]:
         state["messages"].append({"role": "assistant", "content": ONBOARDING_GREETING})
@@ -2536,7 +2724,6 @@ async def onboarding_chat(
         return result
 
     # Иначе — следующий короткий вопрос консьержа (LLM, в отдельном потоке)
-    use_local = await asyncio.to_thread(lambda: _default_use_local_safe(db))
     reply = await asyncio.to_thread(concierge_reply, list(state["messages"]), use_local)
     if (reply or "").strip().upper().startswith("DONE"):
         result = await asyncio.to_thread(_onboarding_finish, db, user, dict(state))
@@ -2558,11 +2745,37 @@ def _default_use_local_safe(db: Session) -> bool:
 def onboarding_status(  # синхронный роут — выполняется в threadpool FastAPI
     request: Request, db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Нужен ли текущему пользователю онбординг (нет сообществ / контекстов)."""
+    """Нужен ли текущему пользователю онбординг + список его сообществ."""
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Требуется авторизация")
-    return {"needs_onboarding": needs_onboarding(db, user.id)}
+    communities = (
+        db.query(UserCommunity)
+        .filter(UserCommunity.user_id == user.id)
+        .order_by(UserCommunity.id.asc())
+        .all()
+    )
+    from models import CommunityGenerationContext as CGC
+
+    configured_ids = {
+        row[0]
+        for row in db.query(CGC.user_community_id).filter(
+            CGC.user_community_id.in_([c.id for c in communities] or [-1]),
+            CGC.is_configured.is_(True),
+        ).all()
+    }
+    return {
+        "needs_onboarding": needs_onboarding(db, user.id),
+        "communities": [
+            {
+                "id": c.id,
+                "group_id": c.group_id,
+                "group_name": c.group_name or f"Сообщество {c.id}",
+                "configured": c.id in configured_ids,
+            }
+            for c in communities
+        ],
+    }
 
 
 @app.get("/api/content-manager/periods")
