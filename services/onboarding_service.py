@@ -380,13 +380,19 @@ def _has_meaningful_answer(state: Dict[str, Any], field: str) -> bool:
         elif str(value or "").strip():
             return True
     messages = state.get("messages", [])
+    # Ответ по полю считается только реплика, сказанная ПОСЛЕ того, как бот
+    # задал вопрос именно этому полю (meta.field == field). Иначе короткие
+    # ответы на предыдущие вопросы («Фото…», «Отзывы…») ложно матчатся
+    # ключевыми словами следующих полей и шаги пропускаются.
     last_q_idx = -1
     for i in range(len(messages) - 1, -1, -1):
         meta = messages[i].get("meta") or {}
         if messages[i].get("role") == "assistant" and meta.get("field") == field:
             last_q_idx = i
             break
-    candidates = messages[last_q_idx + 1:] if last_q_idx != -1 else messages
+    if last_q_idx == -1:
+        return False
+    candidates = messages[last_q_idx + 1:]
     for msg in candidates:
         if msg.get("role") != "user":
             continue

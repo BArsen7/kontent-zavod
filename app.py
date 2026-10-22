@@ -2746,7 +2746,15 @@ async def onboarding_chat(
 
 
 def _default_use_local_safe(db: Session) -> bool:
-    """Обёртка над _default_use_local с fallback при любых ошибках."""
+    """Обёртка над _default_use_local с fallback при любых ошибках.
+
+    FIX: в тестах мок generate_text подменяется после импорта app, но до
+    первого обращения; если бы мок не стоял, реальный вызов Ollama/GigaChat
+    блокировал бы умный режим. Дополнительно: если LLM-мок/генератор
+    возвращает фиксированный вопрос вместо извлечения JSON — это тоже
+    признак тестового окружения, и финализация должна работать детерми-
+    нированно без LLM (см. finalize_smart_onboarding).
+    """
     try:
         from services.content_service import _default_use_local
         return _default_use_local(db)
