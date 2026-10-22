@@ -1549,13 +1549,26 @@ def onboarding_page(  # синхронный роут — выполняется
     if not needs_onboarding(db, user.id):
         return RedirectResponse(url="/content-manager", status_code=302)
     communities = db.query(UserCommunity).filter(UserCommunity.user_id == user.id).all()
+    configured_ids = {
+        row[0]
+        for row in db.query(CommunityGenerationContext.user_community_id).filter(
+            CommunityGenerationContext.user_community_id.in_([c.id for c in communities] or [-1]),
+            CommunityGenerationContext.is_configured.is_(True),
+        ).all()
+    }
     return templates.TemplateResponse(
         request=request,
         name="onboarding.html",
         context={
             "user": user,
+            "parsing_timeout_ms": PARSING_TIMEOUT_MS,
             "communities": [
-                {"id": c.id, "group_name": c.group_name or f"Сообщество {c.id}", "group_id": c.group_id}
+                {
+                    "id": c.id,
+                    "group_name": c.group_name or f"Сообщество {c.id}",
+                    "group_id": c.group_id,
+                    "configured": c.id in configured_ids,
+                }
                 for c in communities
             ],
         },
