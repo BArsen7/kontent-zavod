@@ -223,6 +223,10 @@ def init_db():
             # Тарифы и множественные изображения: добавляем users.tariff_plan_id
             # в старые БД (новые таблицы создаются выше по одной через create).
             _migrate_tariff_and_images(conn)
+            # Structured output кнопок чата: сохраняем сгенерированные LLM кнопки
+            # в chat_messages.buttons_json (nullable — старые сообщения используют
+            # эвристический fallback на фронтенде).
+            _add_column_if_missing(conn, "chat_messages", "buttons_json", "TEXT")
     except Exception as e:  # noqa: BLE001 — миграция не должна ронять приложение
         print(f"[migration] Этап миграции блокировок пропущен: {type(e).__name__}: {e}")
 

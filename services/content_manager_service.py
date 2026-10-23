@@ -516,7 +516,8 @@ def add_chat_message(
     db: Session,
     period_id: int,
     role: str,
-    content: str
+    content: str,
+    buttons: Optional[List[Dict[str, str]]] = None
 ) -> ChatMessage:
     """
     Добавляет сообщение в чат контент-плана.
@@ -526,14 +527,19 @@ def add_chat_message(
         period_id: ID периода контент-плана
         role: Роль (user, assistant, system)
         content: Текст сообщения
-        
+        buttons: Опциональный список кнопок быстрых вариантов
+            [{"label": ..., "value": ...}] (structured output LLM).
+            Сохраняются в chat_messages.buttons_json и возвращаются фронтенду
+            вместе с историей чата — кнопки не нужно пересчитывать эвристикой.
+
     Returns:
         ChatMessage: Созданное сообщение
     """
     message = ChatMessage(
         content_plan_period_id=period_id,
         role=role,
-        content=content
+        content=content,
+        buttons_json=json.dumps(buttons, ensure_ascii=False) if buttons else None,
     )
     
     db.add(message)
@@ -637,7 +643,14 @@ CHAT_OPTION_BUTTONS: Dict[str, List[Dict[str, str]]] = {
 
 
 def detect_chat_buttons(text: str) -> List[Dict[str, str]]:
-    """Подбирает кнопки быстрых вариантов под текст сообщения ИИ.
+    """Эвристический fallback-подбор кнопок по ключевым словам текста ИИ.
+
+    Используется в двух случаях:
+      1. если LLM не вернула валидный structured output с кнопками
+         (вариант «Structured Output» — основной механизм, см.
+         generate_ai_response / parse_llm_chat_output);
+      2. для endpoint'а /api/content-manager/chat-options (исторические
+         сообщения, отрисованные без серверных кнопок).
 
     Содержание и количество кнопок адаптируются под смысл реплики:
     приветствие/вопрос о корректировке -> «правку или генерацию»,
@@ -676,6 +689,121 @@ def detect_chat_buttons(text: str) -> List[Dict[str, str]]:
     return CHAT_OPTION_BUTTONS["default"]
 
 
+# === STRUCTURED OUTPUT: КНОПКИ ГЕНЕРИРУЮТСЯ САМОЙ LLM ВМЕСТЕ С ОТВЕТОМ ===
+# Вариант реализации адаптивных кнопок №1: модель возвращает JSON вида
+#   {"reply": "<текст ответа>", "buttons": [{"category": "...", "label": "..."}, ...]}
+# где category берётся из каталога CHAT_OPTION_BUTTONS (whitelist), а label —
+# свободный текст, сгенерированный ПОД КОНКРЕТНЫЙ ответ (количество и содержание
+# кнопок адаптируются под смысл сообщения). Значение кнопки (value) сервер
+# подставляет из каталога по category — это защищает UI от произвольных payload
+# («__open_settings__» и т.п.) и XSS. Если модель не вернула валидный JSON —
+# включается эвристический fallback detect_chat_buttons().
+CHAT_BUTTONS_INSTRUCTION = """
+
+Формат ответа (СТРОГО ОБЯЗАТЕЛЬНО):
+Ответь ОДНИМ валидным JSON без markdown-обёртки ```json:
+{"reply": "<текст твоего ответа пользователю>", "buttons": [...]}
+
+Поле "buttons" — список из 2-6 кнопок быстрых вариантов ответа, которые
+интерфейс покажет под твоим сообщением. Подбирай их СОДЕРЖАНИЕ и КОЛИЧЕСТВО
+под свой текст: задаёшь вопрос о контенте — предложи варианты контента;
+предлагаешь генерацию плана — «согласовать/скорректировать»; пользователь
+получил готовый план — «оставить/править/пересобрать».
+
+Каждая кнопка: {"category": "<одна из>", "label": "<свой короткий текст кнопки до 60 символов, по ситуации>"}
+Допустимые category:
+- "adjust" — выбор: скорректировать вводные или приступить к генерации плана
+- "current_state" — варианты того, что уже публикуется в сообществе
+- "image_preferences" — варианты источников изображений для постов
+- "setup_form" — предложение открыть форму настроек (анкета не заполнена)
+- "plan_ready" — действия с готовым планом (оставить/пересобрать/править)
+- "default" — универсальные действия (генерация плана, правка вводных, настройки, помощь)
+
+Пример:
+{"reply": "Отлично! Вижу, что вы печёте торты на заказ. Какие фото публикуются сейчас?", "buttons": [{"category": "current_state", "label": "📸 Фото готовых тортов"}, {"category": "current_state", "label": "🎥 Видео процесса выпечки"}, {"category": "current_state", "label": "❓ Пока ничего не публикую"}]}
+
+В "reply" — только обычный текст без HTML и без JSON."""
+
+
+_JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _normalize_llm_buttons(raw_buttons: Any) -> List[Dict[str, str]]:
+    """Валидирует кнопки из structured-output ответа LLM по whitelist-каталогу.
+
+    Args:
+        raw_buttons: значение поля "buttons" из JSON модели.
+
+    Returns:
+        Список кнопок [{"label", "value"}] (может быть пустым — вызывающий код
+        тогда применит fallback).
+    """
+    normalized: List[Dict[str, str]] = []
+    if not isinstance(raw_buttons, list):
+        return normalized
+    for b in raw_buttons:
+        if not isinstance(b, dict):
+            continue
+        category = str(b.get("category") or "").strip().lower()
+        catalog = CHAT_OPTION_BUTTONS.get(category)
+        if not catalog:
+            continue  # неизвестная категория — отбрасываем (защита от галлюцинаций)
+        label = str(b.get("label") or "").strip()
+        if not label or len(label) > 80:
+            continue
+        # value берём из каталога по категории: эталонная формулировка ответа,
+        # защищённая от произвольной инъекции со стороны модели.
+        template = next(
+            (c for c in catalog if c["label"].split(" ", 1)[-1].lower() in label.lower()
+             or label.lower() in c["label"].split(" ", 1)[-1].lower()),
+            None,
+        ) or catalog[0]
+        entry = {"label": label, "value": template["value"]}
+        if entry not in normalized:
+            normalized.append(entry)
+    return normalized[:6]
+
+
+def parse_llm_chat_output(raw: str) -> Optional[Dict[str, Any]]:
+    """Разбирает structured-output ответа контент-менеджера.
+
+    Ожидает JSON {"reply": "...", "buttons": [{"category","label"}, ...]}.
+    Допускает «зашумлённый» вывод локальных моделей: текст до/после JSON,
+    markdown-обёртку ```json, лишние поля.
+
+    Args:
+        raw: Сырой ответ LLM.
+
+    Returns:
+        {"reply": <текст>, "buttons": [<валидированные кнопки>]}, либо None,
+        если JSON не найден/невалиден (вызывающий код использует fallback).
+        "buttons" может быть пустым списком — тогда подбор кнопок выполняется
+        эвристикой detect_chat_buttons(reply).
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+    # Срезаем markdown-обёртку, если модель её добавила
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+    candidates = [text]
+    m = _JSON_BLOCK_RE.search(text)
+    if m and m.group(0) != text:
+        candidates.append(m.group(0))
+    for cand in candidates:
+        try:
+            data = json.loads(cand)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        reply = data.get("reply")
+        if not isinstance(reply, str) or not reply.strip():
+            continue
+        buttons = _normalize_llm_buttons(data.get("buttons"))
+        return {"reply": reply.strip(), "buttons": buttons}
+    return None
+
+
 def _strip_html_from_response(text: str) -> str:
     """Нормализует ответ LLM в plain text для отображения в чате.
 
@@ -703,7 +831,7 @@ def generate_ai_response(
     period_id: int,
     user_message: str,
     user_id: int
-) -> str:
+) -> Any:
     """
     Генерирует ответ ИИ-контент-менеджера на сообщение пользователя.
     
@@ -714,7 +842,11 @@ def generate_ai_response(
         user_id: ID пользователя
         
     Returns:
-        str: Ответ ИИ
+        dict: {"text": <ответ>, "buttons": [<кнопки>]} — кнопки всегда
+        непустые (structured output LLM или эвристический fallback).
+        FIX (адаптивные кнопки, вариант №1): модель возвращает JSON
+        {"reply","buttons"} — текст и кнопки одним вызовом LLM; при отсутствии
+        валидного JSON — plain text + эвристика detect_chat_buttons().
     """
     # Получаем период
     period = db.query(ContentPlanPeriod).filter(
@@ -781,6 +913,10 @@ def generate_ai_response(
             "поступят тебе автоматически."
         )
 
+    # Structured output: просим модель вернуть ответ + адаптивные кнопки одним
+    # JSON (см. CHAT_BUTTONS_INSTRUCTION / parse_llm_chat_output).
+    system_prompt += CHAT_BUTTONS_INSTRUCTION
+
     # Генерируем ответ через ИИ
     try:
         # FIX: провайдер выбирается по системной настройке ai_provider
@@ -791,23 +927,38 @@ def generate_ai_response(
             use_local=_default_use_local(db),
         )
 
+        # FIX (structured output): пробуем разобрать JSON {"reply","buttons"}
+        # до нормализации HTML — кнопки сгенерированы моделью под её ответ.
+        parsed = parse_llm_chat_output(response)
+        if parsed is not None:
+            response = parsed["reply"]
+            llm_buttons = parsed["buttons"] or None
+        else:
+            # Модель ответила обычным текстом — кнопки подберёт эвристика.
+            llm_buttons = None
+
         # FIX (баг с <br> в чате): модель иногда возвращает HTML-разметку
         # (<br>, <b>, списки <ul><li>) вместо обычного текста. Фронтенд экранирует
-        # '<' при выводе, поэтому теги видны пользователю как текст (например,
-        # «...темы:<br>- Рецепты<br>- Мастер-классы»). Нормализуем ответ в plain text.
+        # '<' при выводе, поэтому теги видны пользователю как текст. Нормализуем
+        # ответ в plain text.
         response = _strip_html_from_response(response)
-        
-        # Сохраняем сообщение пользователя и ответ ИИ
+
+        # Кнопки: приоритет у structured output LLM (их содержание и количество
+        # адаптированы под смысл ответа); fallback — эвристика detect_chat_buttons
+        # (кнопки не исчезают на протяжении всего диалога).
+        buttons = llm_buttons or detect_chat_buttons(response)
+
+        # Сохраняем сообщение пользователя и ответ ИИ (кнопки — в buttons_json)
         add_chat_message(db, period_id, "user", user_message)
-        add_chat_message(db, period_id, "assistant", response)
-        
-        return response
+        add_chat_message(db, period_id, "assistant", response, buttons=buttons)
+
+        return {"text": response, "buttons": buttons}
     except Exception as e:
         logger.error(f"Ошибка генерации ответа ИИ: {e}")
         error_msg = "Извините, произошла ошибка при генерации ответа. Попробуйте ещё раз."
         add_chat_message(db, period_id, "user", user_message)
         add_chat_message(db, period_id, "assistant", error_msg)
-        return error_msg
+        return {"text": error_msg, "buttons": detect_chat_buttons(error_msg)}
 
 
 def initialize_chat_with_questions(
