@@ -2888,7 +2888,10 @@ def create_content_plan_period(  # FIX: Event loop unblocked — синхрон�
         community_info=community_info
     )
     
-    # Инициализируем чат с вопросами
+    # Инициализируем чат (идемпотентно): приветствие создаётся ТОЛЬКО если
+    # чат периода пуст. При повторных нажатиях «Неделя / 2 недели / Месяц»
+    # возвращается None — фронтенд в этом случае подтянет существующую
+    # историю через GET /api/content-manager/chat/{id} (без дублей).
     welcome_message = initialize_chat_with_questions(db, period.id)
     
     return {
