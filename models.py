@@ -207,6 +207,11 @@ class ChatMessage(Base):
     )
     role: Mapped[str] = mapped_column(String(20), nullable=False)  # user, assistant, system
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # JSON-список кнопок быстрых вариантов [{"label": ..., "value": ...}],
+    # сгенерированных LLM (structured output) вместе с этим сообщением.
+    # None — кнопки не сохранялись/не генерировались (фронтенд применит
+    # fallback /api/content-manager/chat-options по тексту сообщения).
+    buttons_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
     content_plan_period: Mapped["ContentPlanPeriod"] = relationship("ContentPlanPeriod", back_populates="chat_messages")
