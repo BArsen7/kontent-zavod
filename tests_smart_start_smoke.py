@@ -7,7 +7,9 @@
    форму настроек (не шаблонные вопросы из 3+ пунктов).
 3. generate_ai_response при заполненном контексте получает в system_prompt
    запрет переспрашивать известные данные (проверка контекста на каждом ответе).
-4. Guard: LLM-ответ, похожий на шаблонные вопросы, не подменяет резюме.
+4. Приветствие детерминировано (без LLM) — исключены вариативные дубли-перефразы.
+5. Идемпотентность: повторный вызов initialize_chat_with_questions для уже
+   инициализированного чата НЕ создаёт дубль приветствия (возвращает None).
 """
 import sys
 from datetime import date, timedelta
@@ -118,35 +120,27 @@ check("smart start: резюмирует ЦА", "ЦА: женщины 25-40" in 
 check("smart start: предложение скорректировать/генерировать",
       "скорректировать вводные или сразу приступим к генерации" in msg)
 
-# Корректный LLM-ответ (резюме известных данных) принимается и не содержит
-# шаблонных вопросов.
-svc.generate_text = fake_llm_summary
-db_llm, period_llm = make_db(with_ctx={
-    "goal": "продажи", "audience": "женщины 25-40", "configured": True,
-})
-msg_llm = svc.initialize_chat_with_questions(db_llm, period_llm.id)
-check("smart start (LLM): ответ резюмирует цель/ЦА без шаблонных вопросов",
-      "цель: продажи" in msg_llm and "1)" not in msg_llm and "Какая цель" not in msg_llm)
+# FIX (дублирование приветствий): приветствие теперь ВСЕГДА детерминированное
+# (без обращения к LLM) — текст фиксирован, вариативные перефразы исключены.
+check("smart start: НЕ вызывает LLM (нет дублей-перефразов)", len(calls) == 0)
+
+# Идемпотентность: повторный вызов для уже инициализированного чата не
+# создаёт второй приветственный сигнал (возвращает None, история не растёт).
+msg_again = svc.initialize_chat_with_questions(db, period.id)
+history_after_repeat = svc.get_chat_history(db, period.id)
+check("идемпотентность: повторный вызов вернул None", msg_again is None)
+check("идемпотентность: количество сообщений в чате не изменилось",
+      len(history_after_repeat) == len(svc.get_chat_history(db, period.id)))
+assistant_msgs = [m for m in history_after_repeat if m.role == "assistant"]
+check("идемпотентность: ровно одно assistant-приветствие",
+      len(assistant_msgs) == 1 and assistant_msgs[0].content == msg)
 
 # Сообщение сохранено в историю чата как assistant.
 history = svc.get_chat_history(db, period.id)
 check("smart start: сохранено в ChatMessage (assistant)",
       any(m.role == "assistant" and m.content == msg for m in history))
 
-# --- 2. Guard: LLM вернула шаблонные вопросы -> принимаем детерминированное резюме
-def fake_llm_template(prompt, system_prompt="", use_local=True, **kw):
-    return ("Подскажите, какая цель вашего сообщества? И кто ваша целевая "
-            "аудитория? Также расскажите про специфику.")
-
-svc.generate_text = fake_llm_template
-db2, period2 = make_db(with_ctx={
-    "goal": "вовлечение", "audience": "мужчины 18-30", "configured": True,
-})
-msg2 = svc.initialize_chat_with_questions(db2, period2.id)
-check("guard: шаблонный LLM-ответ отброшен, использовано резюме",
-      "ваша цель: вовлечение" in msg2 and "Я проанализировал" in msg2)
-
-# --- 3. Контекста НЕТ -> одно компактное сообщение о форме ------------------
+# --- 2. Контекста НЕТ -> одно компактное сообщение о форме ------------------
 svc.generate_text = fake_llm_ok
 db3, period3 = make_db(with_ctx=None)
 msg3 = svc.initialize_chat_with_questions(db3, period3.id)
@@ -154,6 +148,9 @@ check("no ctx: просьба заполнить форму настроек", "
 check("no ctx: НЕ рассылаются блоки вопросов 1)-5)",
       all(t not in msg3 for t in ("1)", "2)", "3)", "4)", "5)")))
 check("no ctx: одно компактное сообщение (< 400 симв.)", len(msg3) < 400)
+# Повторный вызов на пустом контексте тоже идемпотентен.
+check("no ctx: повторный вызов не дублирует сообщение",
+      svc.initialize_chat_with_questions(db3, period3.id) is None)
 
 # Частично заполненная, но НЕ подтверждённая анкета — тоже ветка формы.
 db4, period4 = make_db(with_ctx={"goal": "продажи", "configured": False})

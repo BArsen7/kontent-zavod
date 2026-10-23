@@ -719,15 +719,17 @@
                         await loadPeriodPosts();
                     }
 
-                    const chatContainer = document.getElementById('chatMessages');
                     if (result.welcome_message) {
-                        // Приветствие нового плана с кнопками вариантов — сразу,
-                        // без перезагрузки страницы.
-                        chatContainer.textContent = '';
+                        // Приветствие НОВОГО плана с кнопками вариантов — сразу,
+                        // без перезагрузки страницы. Пишется ровно один раз на
+                        // период (идемпотентность на бэкенде), поэтому дублей
+                        // вроде «Спасибо за заполнение анкеты…» больше нет.
+                        document.getElementById('chatMessages').textContent = '';
                         appendChatMessage('assistant', result.welcome_message);
-                    } else if (period) {
-                        // Fallback: welcome_message нет — подтягиваем историю
-                        // с сервера (с защитой от гонок внутри loadChatMessages).
+                    } else {
+                        // Чат уже инициализирован (период существовал ранее) —
+                        // подтягиваем существующую историю с сервера
+                        // (с защитой от гонок внутри loadChatMessages).
                         await loadChatMessages();
                     }
                 } else {
