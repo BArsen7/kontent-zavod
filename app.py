@@ -108,6 +108,7 @@ from services.content_manager_service import (
     generate_content_plan_from_chat,
     update_existing_plan,
     check_and_regenerate_expiring_plan,
+    detect_chat_buttons,
 )
 from services.image_search_service import search_images_web
 from services.tariff_service import (
@@ -2906,6 +2907,32 @@ def create_content_plan_period(  # FIX: Event loop unblocked — синхрон�
         },
         "welcome_message": welcome_message
     }
+
+
+@app.post("/api/content-manager/chat-options")
+def get_chat_options(  # синхронный чистый роут — выполняется в threadpool FastAPI
+    payload: dict,
+    request: Request,
+):
+    """Подбирает кнопки быстрых вариантов ответа под текст сообщения ИИ.
+
+    Используется фронтендом контент-менеджера, чтобы на протяжении ВСЕГО
+    диалога под каждым сообщением ассистента отображались релевантные
+    кнопки; их содержание и количество адаптируются под смысл реплики
+    (приветствие -> «правка/генерация», вопрос о контенте -> варианты
+    контента, вопрос о картинках -> источники изображений, упоминание
+    формы настроек -> «открыть форму», готовый план -> «принять/пересобрать»,
+    любой другой текст -> универсальный набор).
+
+    Args:
+        payload: {"message": "<текст сообщения ассистента>"}
+
+    Returns:
+        {"success": True, "buttons": [{"label": ..., "value": ...}, ...]}
+    """
+    message = str(payload.get("message") or "")
+    buttons = detect_chat_buttons(message)
+    return {"success": True, "buttons": buttons}
 
 
 @app.get("/api/content-manager/chat/{period_id}")
