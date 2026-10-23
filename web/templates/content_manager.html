@@ -765,34 +765,34 @@
         }
 
         // === Кнопки быстрых вариантов ответов в чате ===
-        const CHAT_OPTION_BUTTONS = {
-            adjust: [
-                { label: '✏️ Скорректировать вводные', value: 'Хочу скорректировать вводные: ' },
-                { label: '✨ Приступить к генерации', value: 'Всё верно, приступим к генерации плана' },
-            ],
-            current_state: [
-                { label: '📸 Фотографии готовых работ', value: 'Фотографии готовых работ' },
-                { label: '📝 Отзывы клиентов', value: 'Отзывы клиентов' },
-                { label: '💡 Советы и полезный контент', value: 'Советы и полезный контент' },
-                { label: '❓ Пока ничего не публикую', value: 'Пока ничего не публикую' },
-            ],
-            image_preferences: [
-                { label: '🤖 Генерировать AI-картинки', value: 'Генерировать AI-картинки' },
-                { label: '🔍 Искать картинки в интернете', value: 'Искать картинки в интернете' },
-                { label: '📤 Буду загружать свои фото', value: 'Буду загружать свои фото' },
-                { label: '🎨 Комбинация AI и своих фото', value: 'Комбинация AI-картинок и своих фото' },
-            ],
-        };
+        // Набор кнопок ПОДБИРАЕТСЯ ПОД ТЕКСТ сообщения ИИ на бэкенде
+        // (services/content_manager_service.detect_chat_buttons) и остаётся
+        // видимым на протяжении всего диалога: под каждым сообщением
+        // ассистента показывается релевантный набор (приветствие ->
+        // «правка/генерация», вопрос о контенте -> варианты контента,
+        // вопрос о картинках -> источники изображений, упоминание формы
+        // настроек -> «открыть форму», готовый план -> «принять/пересобрать»,
+        // прочее -> универсальный fallback). Специальная value
+        // "__open_settings__" открывает модалку настроек без отправки.
+        const CHAT_OPTIONS_CACHE = new Map();  // текст -> кнопки (меньше запросов)
 
-        function detectChatButtons(text) {
-            const t = (text || '').toLowerCase();
-            if (t.includes('скорректировать') && t.includes('генераци')) return CHAT_OPTION_BUTTONS.adjust;
-            if (t.includes('что уже публикуется') || t.includes('что из текущего контента') || t.includes('что работает лучше')) return CHAT_OPTION_BUTTONS.current_state;
-            // Вопросы про изображения: «картинки», «изображения», «фото» + признак запроса предпочтений
-            const imgMention = t.includes('картинк') || t.includes('изображен') || t.includes('фотограф');
-            const imgAsk = t.includes('предпочит') || t.includes('нужны ли') || t.includes('какие изображения') || t.includes('использовать');
-            if (imgMention && imgAsk) return CHAT_OPTION_BUTTONS.image_preferences;
-            return null;
+        async function detectChatButtons(text) {
+            const key = (text || '').slice(0, 400);
+            if (CHAT_OPTIONS_CACHE.has(key)) return CHAT_OPTIONS_CACHE.get(key);
+            try {
+                const response = await fetch(`${API_BASE}/api/content-manager/chat-options`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: text || '' })
+                });
+                const data = await response.json();
+                const buttons = (data.success && Array.isArray(data.buttons)) ? data.buttons : null;
+                if (buttons) CHAT_OPTIONS_CACHE.set(key, buttons);
+                return buttons;
+            } catch (error) {
+                console.error('Ошибка подбора кнопок:', error);
+                return null;
+            }
         }
 
         function clearChatButtons() {
@@ -802,6 +802,8 @@
         // Клик по кнопке ЗАМЕЩАЕТ содержимое textarea (без автоотправки) —
         // пользователь может отредактировать ответ перед отправкой.
         // Кнопки остаются видимыми до получения следующего ответа ИИ.
+        // Специальная value "__open_settings__" открывает модалку настроек
+        // сообщества и НЕ подставляет текст в поле ввода.
         function renderChatButtons(buttons) {
             clearChatButtons();
             const container = document.getElementById('chatMessages');
@@ -813,6 +815,10 @@
                 b.className = 'cm-chat-btn';
                 b.textContent = btn.label;
                 b.onclick = () => {
+                    if (btn.value === '__open_settings__') {
+                        openContextModal();
+                        return;
+                    }
                     const inputEl = document.getElementById('chatInput');
                     inputEl.value = btn.value;   // полная замена текста
                     inputEl.focus();
@@ -823,6 +829,20 @@
             });
             container.appendChild(row);
             container.scrollTop = container.scrollHeight;
+        }
+
+        // Под сообщением ассистента ВСЕГДА показываем релевантные кнопки
+        // вариантов (подобраны бэкендом по тексту). Асинхронный ответ может
+        // вернуться после появления нового сообщения — проверяем, что под
+        // ним ещё нет более свежего набора кнопок.
+        function attachButtonsToLastAssistantMessage(content) {
+            detectChatButtons(content).then(buttons => {
+                if (!buttons || !buttons.length) return;
+                const container = document.getElementById('chatMessages');
+                const lastMsg = container.lastElementChild;
+                if (lastMsg && lastMsg.querySelector('.cm-chat-buttons')) return;
+                renderChatButtons(buttons);
+            });
         }
 
         // FIX (переносы строк + XSS): текст сообщения вставляется через
@@ -848,10 +868,13 @@
             container.appendChild(wrapper);
             container.scrollTop = container.scrollHeight;
 
-            // Под сообщением ИИ показываем кнопки вариантов (если вопрос им соответствует)
+            // Под сообщением ИИ ВСЕГДА показываем кнопки вариантов — набор
+            // адаптируется под текст сообщения (detectChatButtons -> бэкенд).
+            // Для user-сообщений старые кнопки убираются: они уже «сыграны».
             if (role === 'assistant') {
-                const buttons = detectChatButtons(content);
-                if (buttons) renderChatButtons(buttons);
+                attachButtonsToLastAssistantMessage(content);
+            } else {
+                clearChatButtons();
             }
             return wrapper;
         }
@@ -887,6 +910,22 @@
 
             container.textContent = '';
             messages.forEach(m => appendChatMessage(m.role, m.content));
+            // Ссылка на wrapper последнего сообщения — используется ниже для
+            // проверки актуальности асинхронного ответа с кнопками.
+            const lastWrapper = container.lastElementChild;
+            // Кнопки вариантов показываются только под ПОСЛЕДНИМ сообщением.
+            // Асинхронные attach-колбэки из промежуточных сообщений при этом
+            // игнорируются: к моменту их возврата контейнер уже перерисован и
+            // lastElementChild не совпадает с сохранённым wrapper (защита от
+            // «наслоения» наборов кнопок из всей истории).
+            const last = messages[messages.length - 1];
+            if (last && last.role === 'assistant') {
+                detectChatButtons(last.content).then(buttons => {
+                    if (!buttons || !buttons.length) return;
+                    if (container.lastElementChild !== lastWrapper) return;
+                    renderChatButtons(buttons);
+                });
+            }
         }
 
         // Send message
