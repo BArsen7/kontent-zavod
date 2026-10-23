@@ -50,6 +50,36 @@
             display: flex;
             flex-direction: column;
         }
+        /* FIX (UX): кнопки быстрых вариантов ответов в чате контент-менеджера.
+           Клик по кнопке ЗАМЕЩАЕТ текст в textarea (без автоотправки) —
+           пользователь может отредактировать ответ перед отправкой. */
+        .cm-chat-buttons {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+            max-width: 80%;
+        }
+        .cm-chat-btn {
+            background-color: #eff6ff;
+            border: 1px solid #bfdbfe;
+            color: #1d4ed8;
+            font-size: 13px;
+            padding: 6px 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background-color .15s ease, border-color .15s ease;
+            text-align: left;
+        }
+        .cm-chat-btn:hover {
+            background-color: #dbeafe;
+            border-color: #93c5fd;
+        }
+        .cm-chat-btn.cm-chat-btn-active {
+            background-color: #1d4ed8;
+            border-color: #1d4ed8;
+            color: #ffffff;
+        }
         /* FIX (UI): утилитарные классы, используемые в новой разметке (модалка
            контекста, превью постов), но отсутствующие в локальном styles.css. */
         .max-w-xl { max-width: 36rem; }
@@ -666,12 +696,28 @@
                     showToast(`Черновик создан: ${getPeriodTypeLabel(result.period.period_type)}`);
                     currentPeriodId = result.period.id;
                     await loadPeriods();
+                    // FIX (UX): selectPeriod() асинхронно перезагружает историю
+                    // чата с сервера — дожидаемся её, чтобы она не затёрла
+                    // приветственное сообщение, и показываем результат сразу,
+                    // без перезагрузки страницы. Новый план уже выбран
+                    // автоматически (currentPeriodId + подсветка в «Мои планы»).
                     selectPeriod(currentPeriodId);
-                    
-                    // Display welcome message
+                    const period = periods.find(p => p.id === currentPeriodId);
+                    if (period) {
+                        await Promise.all([loadChatMessages(), loadPeriodPosts()]);
+                    } else if (result.welcome_message) {
+                        const chatContainer = document.getElementById('chatMessages');
+                        chatContainer.innerHTML = '';
+                        appendChatMessage('assistant', result.welcome_message);
+                    }
+
+                    // Если история пуста или загрузить не удалось — покажем
+                    // приветствие из ответа сервера (с кнопками вариантов).
                     const chatContainer = document.getElementById('chatMessages');
-                    chatContainer.innerHTML = '';
-                    appendChatMessage('assistant', result.welcome_message);
+                    if (!chatContainer.querySelector('.chat-message') && result.welcome_message) {
+                        chatContainer.innerHTML = '';
+                        appendChatMessage('assistant', result.welcome_message);
+                    }
                 } else {
                     throw new Error(result.detail || 'Ошибка создания периода');
                 }
@@ -683,16 +729,77 @@
         // Load chat messages
         async function loadChatMessages() {
             if (!currentPeriodId) return;
-            
+
             try {
                 const response = await fetch(`${API_BASE}/api/content-manager/chat/${currentPeriodId}`);
                 if (!response.ok) throw new Error('Ошибка загрузки');
                 const data = await response.json();
-                
+
                 renderChatMessages(data.messages || []);
             } catch (error) {
                 console.error('Ошибка:', error);
             }
+        }
+
+        // === Кнопки быстрых вариантов ответов в чате ===
+        const CHAT_OPTION_BUTTONS = {
+            adjust: [
+                { label: '✏️ Скорректировать вводные', value: 'Хочу скорректировать вводные: ' },
+                { label: '✨ Приступить к генерации', value: 'Всё верно, приступим к генерации плана' },
+            ],
+            current_state: [
+                { label: '📸 Фотографии готовых работ', value: 'Фотографии готовых работ' },
+                { label: '📝 Отзывы клиентов', value: 'Отзывы клиентов' },
+                { label: '💡 Советы и полезный контент', value: 'Советы и полезный контент' },
+                { label: '❓ Пока ничего не публикую', value: 'Пока ничего не публикую' },
+            ],
+            image_preferences: [
+                { label: '🤖 Генерировать AI-картинки', value: 'Генерировать AI-картинки' },
+                { label: '🔍 Искать картинки в интернете', value: 'Искать картинки в интернете' },
+                { label: '📤 Буду загружать свои фото', value: 'Буду загружать свои фото' },
+                { label: '🎨 Комбинация AI и своих фото', value: 'Комбинация AI-картинок и своих фото' },
+            ],
+        };
+
+        function detectChatButtons(text) {
+            const t = (text || '').toLowerCase();
+            if (t.includes('скорректировать') && t.includes('генераци')) return CHAT_OPTION_BUTTONS.adjust;
+            if (t.includes('что уже публикуется') || t.includes('что из текущего контента') || t.includes('что работает лучше')) return CHAT_OPTION_BUTTONS.current_state;
+            // Вопросы про изображения: «картинки», «изображения», «фото» + признак запроса предпочтений
+            const imgMention = t.includes('картинк') || t.includes('изображен') || t.includes('фотограф');
+            const imgAsk = t.includes('предпочит') || t.includes('нужны ли') || t.includes('какие изображения') || t.includes('использовать');
+            if (imgMention && imgAsk) return CHAT_OPTION_BUTTONS.image_preferences;
+            return null;
+        }
+
+        function clearChatButtons() {
+            document.querySelectorAll('#chatMessages .cm-chat-buttons').forEach(el => el.remove());
+        }
+
+        // Клик по кнопке ЗАМЕЩАЕТ содержимое textarea (без автоотправки) —
+        // пользователь может отредактировать ответ перед отправкой.
+        // Кнопки остаются видимыми до получения следующего ответа ИИ.
+        function renderChatButtons(buttons) {
+            clearChatButtons();
+            const container = document.getElementById('chatMessages');
+            const row = document.createElement('div');
+            row.className = 'cm-chat-buttons';
+            buttons.forEach(btn => {
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'cm-chat-btn';
+                b.textContent = btn.label;
+                b.onclick = () => {
+                    const inputEl = document.getElementById('chatInput');
+                    inputEl.value = btn.value;   // полная замена текста
+                    inputEl.focus();
+                    row.querySelectorAll('.cm-chat-btn').forEach(x => x.classList.remove('cm-chat-btn-active'));
+                    b.classList.add('cm-chat-btn-active');
+                };
+                row.appendChild(b);
+            });
+            container.appendChild(row);
+            container.scrollTop = container.scrollHeight;
         }
 
         // FIX (переносы строк + XSS): текст сообщения вставляется через
@@ -717,6 +824,12 @@
             wrapper.appendChild(bubble);
             container.appendChild(wrapper);
             container.scrollTop = container.scrollHeight;
+
+            // Под сообщением ИИ показываем кнопки вариантов (если вопрос им соответствует)
+            if (role === 'assistant') {
+                const buttons = detectChatButtons(content);
+                if (buttons) renderChatButtons(buttons);
+            }
             return wrapper;
         }
 
@@ -730,16 +843,26 @@
             const container = document.getElementById('chatMessages');
 
             if (messages.length === 0) {
-                container.innerHTML = `
-                    <div class="text-center text-gray-500 mt-20">
-                        <p class="text-lg">💬 Начните диалог с контент-менеджером!</p>
-                        <p class="text-sm mt-2">Расскажите о вашем сообществе и целях</p>
-                    </div>
-                `;
+                // FIX (UX): очистка через textContent вместо innerHTML —
+                // вложенные .cm-chat-buttons (кнопки вариантов) при этом
+                // гарантированно удаляются (innerHTML='' не трогает узлы,
+                // добавленные appendChild после установки строки).
+                container.textContent = '';
+                const hint = document.createElement('div');
+                hint.className = 'text-center text-gray-500 mt-20';
+                const p1 = document.createElement('p');
+                p1.className = 'text-lg';
+                p1.textContent = '💬 Начните диалог с контент-менеджером!';
+                const p2 = document.createElement('p');
+                p2.className = 'text-sm mt-2';
+                p2.textContent = 'Расскажите о вашем сообществе и целях';
+                hint.appendChild(p1);
+                hint.appendChild(p2);
+                container.appendChild(hint);
                 return;
             }
 
-            container.innerHTML = '';
+            container.textContent = '';
             messages.forEach(m => appendChatMessage(m.role, m.content));
         }
 

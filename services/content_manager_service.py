@@ -500,7 +500,7 @@ def get_chat_history(db: Session, period_id: int) -> List[ChatMessage]:
     """
     messages = db.query(ChatMessage).filter(
         ChatMessage.content_plan_period_id == period_id
-    ).order_by(ChatMessage.created_at.asc()).all()
+    ).order_by(ChatMessage.id.asc()).all()
     
     return messages
 
