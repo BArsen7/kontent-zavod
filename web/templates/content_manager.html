@@ -687,36 +687,48 @@
                 const response = await fetch(`${API_BASE}/api/content-manager/period/create`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ period_type: periodType })
+                    // FIX (привязка): отправляем id выбранного сообщества, чтобы
+                    // умный старт чата строился по контексту именно его
+                    body: JSON.stringify({
+                        period_type: periodType,
+                        community_id: selectedCommunityId(),
+                    })
                 });
-                
+
                 const result = await response.json();
-                
+
                 if (response.ok && result.success) {
                     showToast(`Черновик создан: ${getPeriodTypeLabel(result.period.period_type)}`);
                     currentPeriodId = result.period.id;
+                    // FIX (UX): дожидаемся обновления списка — новый план
+                    // появляется в «Мои планы» сразу, без перезагрузки страницы.
                     await loadPeriods();
-                    // FIX (UX): selectPeriod() асинхронно перезагружает историю
-                    // чата с сервера — дожидаемся её, чтобы она не затёрла
-                    // приветственное сообщение, и показываем результат сразу,
-                    // без перезагрузки страницы. Новый план уже выбран
-                    // автоматически (currentPeriodId + подсветка в «Мои планы»).
-                    selectPeriod(currentPeriodId);
+
                     const period = periods.find(p => p.id === currentPeriodId);
                     if (period) {
-                        await Promise.all([loadChatMessages(), loadPeriodPosts()]);
-                    } else if (result.welcome_message) {
-                        const chatContainer = document.getElementById('chatMessages');
-                        chatContainer.innerHTML = '';
-                        appendChatMessage('assistant', result.welcome_message);
+                        // Новый план выбирается автоматически: подсветка в списке,
+                        // инфо-строка и кнопки действий. selectPeriod()/loadChatMessages()
+                        // здесь НЕ вызываем — асинхронный ответ истории чата мог
+                        // вернуться позже прямой отрисовки приветствия и затереть
+                        // чат (из-за чего результат был виден только после
+                        // перезагрузки страницы).
+                        document.getElementById('currentPeriodInfo').textContent =
+                            `${getPeriodTypeLabel(period.period_type)}: ${formatDate(period.start_date)} - ${formatDate(period.end_date)}`;
+                        document.getElementById('planActions').classList.remove('hidden');
+                        renderPeriodsList();
+                        await loadPeriodPosts();
                     }
 
-                    // Если история пуста или загрузить не удалось — покажем
-                    // приветствие из ответа сервера (с кнопками вариантов).
                     const chatContainer = document.getElementById('chatMessages');
-                    if (!chatContainer.querySelector('.chat-message') && result.welcome_message) {
-                        chatContainer.innerHTML = '';
+                    if (result.welcome_message) {
+                        // Приветствие нового плана с кнопками вариантов — сразу,
+                        // без перезагрузки страницы.
+                        chatContainer.textContent = '';
                         appendChatMessage('assistant', result.welcome_message);
+                    } else if (period) {
+                        // Fallback: welcome_message нет — подтягиваем историю
+                        // с сервера (с защитой от гонок внутри loadChatMessages).
+                        await loadChatMessages();
                     }
                 } else {
                     throw new Error(result.detail || 'Ошибка создания периода');
@@ -730,10 +742,19 @@
         async function loadChatMessages() {
             if (!currentPeriodId) return;
 
+            const requestedPeriodId = currentPeriodId;  // защита от гонок (см. ниже)
+
             try {
                 const response = await fetch(`${API_BASE}/api/content-manager/chat/${currentPeriodId}`);
                 if (!response.ok) throw new Error('Ошибка загрузки');
                 const data = await response.json();
+
+                // FIX (UX): асинхронный ответ может вернуться ПОЗЖЕ, чем
+                // завершится createPeriod()/selectPeriod() для другого периода
+                // или после прямой отрисовки приветствия нового плана — раньше
+                // это затирало чат и результат был виден только после
+                // перезагрузки страницы. Игнорируем устаревший ответ.
+                if (currentPeriodId !== requestedPeriodId) return;
 
                 renderChatMessages(data.messages || []);
             } catch (error) {

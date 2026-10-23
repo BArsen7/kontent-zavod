@@ -174,7 +174,51 @@ def get_or_create_generation_context(
 
 
 def _period_user_community(db: Session, period: ContentPlanPeriod) -> Optional[UserCommunity]:
-    """Возвращает первое сообщество пользователя периода (для привязки контекста)."""
+    """Возвращает сообщество, к которому привязан период (для умного старта чата).
+
+    FIX: раньше всегда возвращалось ПЕРВОЕ сообщество пользователя — при
+    нескольких сообществах приветствие строилось по контексту НЕ того
+    сообщества, для которого создавался план (контекст выбранного
+    сообщества не подхватывался, чат выглядел «не настроенным», а в
+    «Мои планы» результат был виден только после перезагрузки из-за
+    рассинхронизации состояния). Теперь приоритет:
+    1. community_info.period_community_id — id сообщества, явно выбранного
+       пользователем в момент создания периода;
+    2. единственное сообщество пользователя;
+    3. первое сообщество (обратная совместимость).
+    """
+    import json as _json
+
+    raw = (period.community_info or "").strip() if period is not None else ""
+    if raw:
+        # 1) Явная привязка периода к сообществу (JSON {"period_community_id": N})
+        try:
+            data = _json.loads(raw)
+            if isinstance(data, dict):
+                cid = data.get("period_community_id")
+                if cid:
+                    comm = db.query(UserCommunity).filter(
+                        UserCommunity.id == int(cid),
+                        UserCommunity.user_id == period.user_id,
+                    ).first()
+                    if comm is not None:
+                        return comm
+        except (ValueError, TypeError):
+            pass
+        # 2) Совпадение по group_id / названию внутри текстового описания
+        comms = db.query(UserCommunity).filter(
+            UserCommunity.user_id == period.user_id
+        ).order_by(UserCommunity.id.asc()).all()
+        for c in comms:
+            name = (c.group_name or "").strip()
+            if name and name in raw:
+                return c
+            if str(c.group_id) in raw:
+                return c
+        if len(comms) == 1:
+            return comms[0]
+        if comms:
+            return comms[0]
     return db.query(UserCommunity).filter(
         UserCommunity.user_id == period.user_id
     ).order_by(UserCommunity.id.asc()).first()

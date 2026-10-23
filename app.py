@@ -2835,6 +2835,7 @@ def get_content_plan_periods(  # FIX: Event loop unblocked — синхронн�
 class PeriodCreateRequest(BaseModel):
     """Тело запроса создания периода контент-плана."""
     period_type: str = "week"
+    community_id: Optional[int] = None  # UserCommunity.id — сообщество, для которого создаётся план
 
 
 class PeriodRenameRequest(BaseModel):
@@ -2859,8 +2860,26 @@ def create_content_plan_period(  # FIX: Event loop unblocked — синхрон�
         )
     logger.info(f"[period/create] Создаём период типа '{period_type}' для пользователя id={user.id}")
 
-    # Получаем информацию о сообществах
+    # FIX (привязка периода к сообществу): если пользователь выбрал конкретное
+    # сообщество — сохраняем в community_info JSON с period_community_id, чтобы
+    # умный старт чата строился по контексту ИМЕННО этого сообщества.
     community_info = get_user_community_info(db, user.id)
+    if payload.community_id:
+        comm = db.query(UserCommunity).filter(
+            UserCommunity.id == payload.community_id,
+            UserCommunity.user_id == user.id,
+        ).first()
+        if comm is None:
+            raise HTTPException(status_code=404, detail="Сообщество не найдено")
+        import json as _json
+        community_info = _json.dumps(
+            {
+                "period_community_id": comm.id,
+                "group_name": comm.group_name or f"Сообщество {comm.group_id}",
+                "group_id": comm.group_id,
+            },
+            ensure_ascii=False,
+        )
 
     period = get_or_create_content_plan_period(
         db=db,
