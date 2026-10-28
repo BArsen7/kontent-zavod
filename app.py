@@ -2800,20 +2800,93 @@ def onboarding_status(  # синхронный роут — выполняетс
     }
 
 
+def _period_community_id(community_info: Optional[str]) -> Optional[int]:
+    """Извлекает period_community_id из community_info периода (JSON или текст).
+
+    FIX (планы по сообществу): позволяет фильтровать «Мои планы» по выбранному
+    сообществу. Для старых периодов (plain text / пустое значение) дополнительно
+    пробуем сопоставить описание с сообществами пользователя (по group_id или
+    названию), чтобы не потерять привязку исторических планов.
+    Возвращает id сообщества либо None (план вне сообществ / непривязанный).
+    """
+    import json as _json
+    raw = (community_info or "").strip()
+    if not raw:
+        return None
+    try:
+        data = _json.loads(raw)
+        if isinstance(data, dict):
+            cid = data.get("period_community_id")
+            return int(cid) if cid else None
+    except (ValueError, TypeError):
+        pass
+    return None
+
+
+def _match_community_from_text(db: Session, user_id: int, raw: str) -> Optional[int]:
+    """Сопоставляет текстовый community_info с сообществом пользователя.
+
+    FIX (планы по сообществу): ищем ПОЛНОЕ вхождение названия сообщества или
+    его group_id в тексте. Подстрока внутри другого слова не учитывается
+    (например, generic-текст «Информация о сообществах отсутствует» не должен
+    матчиться с названием «Сообщество»).
+    """
+    comms = db.query(UserCommunity).filter(
+        UserCommunity.user_id == user_id
+    ).order_by(UserCommunity.id.asc()).all()
+    for c in comms:
+        name = (c.group_name or "").strip()
+        if name and re.search(rf"(?<![\wА-Яа-яЁё]){re.escape(name)}(?![\wА-Яа-яЁё])", raw):
+            return c.id
+        gid = str(c.group_id)
+        if gid and re.search(rf"(?<!\d){re.escape(gid)}(?!\d)", raw):
+            return c.id
+    return None
+
+
 @app.get("/api/content-manager/periods")
 def get_content_plan_periods(  # FIX: Event loop unblocked — синхронный роут выполняется в threadpool FastAPI
     request: Request,
+    community_id: Optional[int] = Query(None, description="UserCommunity.id — вернуть только планы этого сообщества"),
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
-    """Возвращает список периодов контент-плана пользователя."""
+    """Возвращает список периодов контент-плана пользователя.
+
+    FIX (планы по сообществу): на странице контент-менеджера в «Мои планы»
+    должны отображаться только планы выбранного сообщества, а не все планы
+    пользователя. При переданном ?community_id=N возвращаются периоды,
+    привязанные к этому сообществу; без параметра поведение прежнее —
+    все планы пользователя (обратная совместимость).
+    """
     user = get_current_user(request, db)
     if not user:
         raise HTTPException(status_code=401, detail="Пользователь не авторизован")
-    
-    periods = db.query(ContentPlanPeriod).filter(
+
+    query = db.query(ContentPlanPeriod).filter(
         ContentPlanPeriod.user_id == user.id
-    ).order_by(ContentPlanPeriod.created_at.desc()).all()
-    
+    )
+    all_periods = query.order_by(ContentPlanPeriod.created_at.desc()).all()
+
+    periods = all_periods
+    if community_id is not None:
+        if community_id:  # 0/None = «Без сообщества»: показываем только непривязанные планы
+            comm_exists = db.query(UserCommunity).filter(
+                UserCommunity.id == community_id,
+                UserCommunity.user_id == user.id,
+            ).first()
+            if comm_exists is None:
+                raise HTTPException(status_code=404, detail="Сообщество не найдено")
+        filtered = []
+        for p in all_periods:
+            pid = _period_community_id(p.community_info)
+            if pid is None and p.community_info and community_id:
+                # Старые периоды: plain-text community_info — пробуем сопоставить
+                # с конкретным сообществом (по названию/group_id в тексте).
+                pid = _match_community_from_text(db, user.id, p.community_info.strip())
+            if pid == community_id:
+                filtered.append(p)
+        periods = filtered
+
     return {
         "periods": [
             {
@@ -2824,6 +2897,7 @@ def get_content_plan_periods(  # FIX: Event loop unblocked — синхронн�
                 "end_date": p.end_date.isoformat(),
                 "status": p.status,
                 "community_info": p.community_info,
+                "community_id": _period_community_id(p.community_info),
                 "created_at": p.created_at.isoformat(),
                 "updated_at": p.updated_at.isoformat() if p.updated_at else None,
                 "posts_count": len(p.posts)
