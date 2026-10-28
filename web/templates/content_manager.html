@@ -365,6 +365,9 @@
 
         function onContextCommunityChange() {
             updateContextStatusLine();
+            // FIX (планы по сообществу): при смене сообщества перезагружаем
+            // «Мои планы» — теперь там только планы выбранного сообщества.
+            loadPeriods();
             const cid = selectedCommunityId();
             // При выборе ненастроенного сообщества сразу показываем форму настроек
             if (cid && contextConfiguredCache[cid] === false) openContextModal();
@@ -539,9 +542,15 @@
         }
 
         // Load periods
+        // FIX (планы по сообществу): в «Мои планы» показываем только планы
+        // выбранного сообщества (community_id из селекта). community_id=0 —
+        // «Без сообщества»: непривязанные планы. Без параметра сервер
+        // возвращает все планы пользователя (обратная совместимость API).
         async function loadPeriods() {
             try {
-                const response = await fetch(`${API_BASE}/api/content-manager/periods`);
+                const cid = selectedCommunityId();
+                const qs = cid ? `?community_id=${cid}` : '?community_id=0';
+                const response = await fetch(`${API_BASE}/api/content-manager/periods${qs}`);
                 if (!response.ok) throw new Error('Ошибка загрузки');
                 const data = await response.json();
                 
@@ -1150,9 +1159,11 @@
         }
 
         // Initialize
-        document.addEventListener('DOMContentLoaded', () => {
+        document.addEventListener('DOMContentLoaded', async () => {
+            // FIX (планы по сообществу): сначала определяем сообщества —
+            // список «Мои планы» фильтруется по выбранному сообществу.
+            await initContextCommunities();
             loadPeriods();
-            initContextCommunities();
 
             // FIX (чат): Enter — отправка, Shift+Enter — перенос строки.
             // Чат-инпут переведён с <input> на <textarea>, чтобы \n работал.
