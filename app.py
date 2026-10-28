@@ -2836,10 +2836,10 @@ def _match_community_from_text(db: Session, user_id: int, raw: str) -> Optional[
     ).order_by(UserCommunity.id.asc()).all()
     for c in comms:
         name = (c.group_name or "").strip()
-        if name and re.search(rf"(?<![\wА-Яа-яЁё]){re.escape(name)}(?![\wА-Яа-яЁё])", raw):
+        if name and _re.search(rf"(?<![\wА-Яа-яЁё]){_re.escape(name)}(?![\wА-Яа-яЁё])", raw):
             return c.id
         gid = str(c.group_id)
-        if gid and re.search(rf"(?<!\d){re.escape(gid)}(?!\d)", raw):
+        if gid and _re.search(rf"(?<!\d){_re.escape(gid)}(?!\d)", raw):
             return c.id
     return None
 
@@ -2879,10 +2879,16 @@ def get_content_plan_periods(  # FIX: Event loop unblocked — синхронн�
         filtered = []
         for p in all_periods:
             pid = _period_community_id(p.community_info)
-            if pid is None and p.community_info and community_id:
+            if pid is None and p.community_info:
                 # Старые периоды: plain-text community_info — пробуем сопоставить
                 # с конкретным сообществом (по названию/group_id в тексте).
                 pid = _match_community_from_text(db, user.id, p.community_info.strip())
+            if not community_id:
+                # «Без сообщества»: непривязанные планы (community_info пуст либо
+                # не ссылается ни на одно сообщество пользователя).
+                if not pid:
+                    filtered.append(p)
+                continue
             if pid == community_id:
                 filtered.append(p)
         periods = filtered
