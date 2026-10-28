@@ -9,8 +9,7 @@ from models import (User, UserCommunity, PlatformAccount, HistoricalPost,
 from services.content_manager_service import (
     build_analytics_block, build_context_block, _top_historical_posts,
     get_configured_generation_context, initialize_chat_with_questions,
-    generate_ai_response, CONTEXT_SETUP_BLOCK_A, CONTEXT_SETUP_BLOCK_B,
-    CONTEXT_SETUP_BLOCK_C,
+    generate_ai_response, CONTEXT_SETUP_FORM_MESSAGE,
 )
 
 engine = create_engine("sqlite:///:memory:")
@@ -24,25 +23,31 @@ p = ContentPlanPeriod(id=7, user_id=1, period_type="week",
                       start_date=dt.date(2026,10,15), end_date=dt.date(2026,10,21), status="draft")
 db.add(p); db.commit()
 
-# --- ДАННЫХ НЕТ: analytics пуст, вопросы блоками ---
+# --- ДАННЫХ НЕТ: analytics пуст, старт — сообщение о форме настроек ---
 assert build_analytics_block(db, p) == "", "analytics должен быть пуст без данных"
 assert get_configured_generation_context(db, 10) is None
 msg = initialize_chat_with_questions(db, 7)
-assert msg == CONTEXT_SETUP_BLOCK_A and "1)" in msg and "5)" not in msg, msg[:200]
-print("BLOCK A:", msg.replace("\n"," | "))
-# второй заход без ответов -> тот же блок A (диалог не прыгает вперёд)
+assert msg == CONTEXT_SETUP_FORM_MESSAGE and "форму настроек" in msg, msg[:200]
+print("FORM MSG:", msg.replace("\n"," | ")[:120])
+# второй заход: чат уже инициализирован -> приветствие не дублируется (None)
 msg = initialize_chat_with_questions(db, 7)
-assert msg == CONTEXT_SETUP_BLOCK_A
+assert msg is None, "повторная инициализация не должна создавать дубль приветствия"
 
-# частичная анкета (is_configured=False, 2 поля) -> блок B
-db.add(CommunityGenerationContext(user_community_id=10, goal="Продажи",
-                                  target_audience="Женщины 25-45", is_configured=False))
-db.commit()
-msg = initialize_chat_with_questions(db, 7)
-assert msg == CONTEXT_SETUP_BLOCK_B, msg
-print("BLOCK B ok")
+# новая анкета в другом сообществе (is_configured=False) -> то же сообщение о форме
+ctx10 = CommunityGenerationContext(user_community_id=10, goal="Продажи",
+                                   target_audience="Женщины 25-45", is_configured=False)
+db.add(ctx10)
+db.add(UserCommunity(id=11, user_id=1, group_id=-321, group_name="Тест2", group_token="tok"))
+db.add(CommunityGenerationContext(id=99, user_community_id=11, goal="Путешествия",
+                                  target_audience="", is_configured=False))
+p3 = ContentPlanPeriod(id=9, user_id=1, period_type="week",
+                       start_date=dt.date(2026,10,15), end_date=dt.date(2026,10,21), status="draft")
+db.add(p3); db.commit()
+msg = initialize_chat_with_questions(db, 9)
+assert msg == CONTEXT_SETUP_FORM_MESSAGE, msg
+print("PARTIAL CTX -> form-message branch ok")
 
-# Частичная анкета + есть история -> всё равно диалог настройки (не приветствие-аналитика)
+# Частичная анкета + есть история -> всё ещё ветка формы (не приветствие-аналитика)
 db.add(PlatformAccount(id=50, account_id=-123, platform="vk", access_token="t"))
 for i, (txt, er, top) in enumerate([("Рецепт медовика на меду", 8.4, True),
                                     ("Мастер-класс по крему", 5.1, True),
@@ -50,13 +55,17 @@ for i, (txt, er, top) in enumerate([("Рецепт медовика на мед�
     db.add(HistoricalPost(id=i+1, community_id=50, vk_post_id=100+i, text=txt,
                           engagement_rate=er, is_top_performer=top))
 db.commit()
-msg = initialize_chat_with_questions(db, 7)
-assert "медовик" not in msg and "цель" in msg.lower(), msg
-print("PARTIAL CTX + HISTORY -> questions branch ok")
+p4 = ContentPlanPeriod(id=10, user_id=1, period_type="week",
+                       start_date=dt.date(2026,10,15), end_date=dt.date(2026,10,21), status="draft")
+db.add(p4); db.commit()
+msg = initialize_chat_with_questions(db, 10)
+assert msg == CONTEXT_SETUP_FORM_MESSAGE and "медовик" not in msg, msg
+print("PARTIAL CTX + HISTORY -> form branch ok")
 
 
 # --- ДАННЫЕ ЕСТЬ: аналитическое приветствие БЕЗ вопросов ---
-ctx = db.query(CommunityGenerationContext).first()
+# берём именно анкету сообщества 10 (в тесте есть и другая, незаполненная)
+ctx = db.query(CommunityGenerationContext).filter_by(user_community_id=10).first()
 ctx.is_configured = True; ctx.community_specifics = "Домашняя выпечка"; ctx.goal="Продажи"
 ctx.image_source_preferences = '["ai", "web_search"]'
 ctx.current_state_and_what_works = "Печенье с цветным узором заходит лучше всего"
