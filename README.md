@@ -15,7 +15,7 @@
 - 🔐 **Авторизация по email и паролю** — регистрация, вход, защищённые сессии (httponly-cookie)
 - 👥 **Управление несколькими сообществами VK** — добавление сообществ с проверкой прав администратора, динамическая регистрация токенов
 - 🤖 **Генерация текста** через локальные LLM (Ollama: Qwen2.5) или облачный API **GigaChat Premium** (`GigaChat-Pro` / `GigaChat-Max`) — провайдер выбирается в админке без перезапуска
-- 🎨 **Создание изображений** через Kandinsky / GigaChat Image API (облачно или локально через Ollama; ответы `url` и `b64_json` сохраняются в `static/uploads/`)
+- 🎨 **Создание изображений** через Kandinsky / GigaChat Image API (облачно или локально через Ollama; ответы `url` и `b64_json` сохраняются в `data/media/`)
 - 💎 **Тарифные планы** — гибкие лимиты, настраиваемые админом: дальность контент-плана (дни), рубрики, посты день/неделя/месяц, количество сообществ, разрешение и источники картинок (`ai` / `web_search` / `user_upload`); проверка лимитов перед генерацией (403 при превышении)
 - 🖼 **Мультиизображения постов** — несколько картинок на пост (`PostImage`, порядок `order_index`): загрузка своих файлов (`/api/upload-image` → `data/media/`), поиск картинок в интернете (SerpApi Google Images или mock-режим picsum.photos без ключа), гибридная автоподстановка по тарифу (`assign_images_to_post`) и полное превью поста с галереей в веб-интерфейсе
 - 🧩 **Контекст генерации сообщества** — анкета «Цель / Специфика / ЦА / Что уже работает / Предпочтения по картинкам» (`CommunityGenerationContext`): пока контекст не настроен, ИИ-менеджер задаёт структурированные вопросы; после настройки данные подставляются в системный промпт в блоке `<CONTEXT>...</CONTEXT>`
@@ -65,7 +65,7 @@
 | Модели БД | `models.py` | SQLAlchemy-модели: `User` (+`is_blocked`/`blocked_reason`/`blocked_at`), `UserCommunity` (+блокировка), `Session`, `PlatformAccount`, `ContentPlan`, `Post`, `PostStats`, `ContentPlanPeriod`, `ChatMessage`, `SystemSetting` (динамические настройки AI) |
 | Генерация текста | `generators/text_generator.py` | `generate_text()` — диспетчер провайдеров: GigaChat (облако) / Ollama (локально) |
 | Генерация изображений | `generators/image_generator.py` | `generate_kandinsky()` — Kandinsky через GigaChat Image API (облако) или локальная модель через Ollama |
-| Клиент GigaChat | `services/gigachat_client.py` | `GigaChatClient` — асинхронный httpx-клиент: OAuth-токен (кэш+авто-обновление), `/chat/completions`, `/images/generations` |
+| Клиент GigaChat | `services/gigachat_client.py` | `GigaChatClient` — синхронный `requests`-клиент: OAuth-токен (кэш+авто-обновление), `/chat/completions`, `/images/generations` |
 | Публикация | `publishers/vk_publisher.py` | `VKPublisher` — публикация в одно сообщество (токен из настроек) |
 | Обработка ошибок VK | `vk_errors.py` | `create_vk_session` (api_version 5.199), `describe_api_error`, `with_retry`, нормализация `group_id` |
 | Мастер-бот | `managers/community_manager.py` | `CommunityManager` — управление множеством сообществ, LongPoll, `/add_token` |
@@ -123,14 +123,14 @@ pip install -r requirements.txt
 | `pydantic` + `pydantic-settings` | Модели и конфигурация из `.env` |
 | `python-dotenv` | Загрузка переменных окружения |
 | `requests` | Синхронный HTTP-клиент (Ollama, скрипты) |
-| `httpx>=0.24` | **Асинхронный HTTP-клиент — обязателен** для интеграции с облачным API GigaChat (`services/gigachat_client.py`) |
+| `httpx>=0.24` | **Асинхронный HTTP-клиент — обязателен** для сервиса поиска изображений в интернете (`services/image_search_service.py`, SerpApi / mock-режим) |
 | `jinja2` | HTML-шаблоны веб-интерфейса |
 | `python-multipart` | Обработка form-данных (логин/регистрация, формы админки) |
 | `apscheduler` | Фоновый планировщик публикаций |
 | `vk-api` | Клиент ВКонтакте (публикация, LongPoll) |
 | `bcrypt` | Хеширование паролей пользователей (используется напрямую; `passlib` несовместим с `bcrypt >= 4.1`) |
 
-> ⚠️ **Обновление зависимостей**: после `git pull` обязательно выполните `pip install -r requirements.txt` — в проекте появился новый обязательный пакет `httpx` (асинхронный клиент GigaChat, `services/gigachat_client.py`). Без него запуск падает с ошибкой `ModuleNotFoundError: No module named 'httpx'` при импорте `app.py`.
+> ⚠️ **Обновление зависимостей**: после `git pull` обязательно выполните `pip install -r requirements.txt` — в проекте появился новый обязательный пакет `httpx` (асинхронный клиент поиска изображений, `services/image_search_service.py`). Без него запуск падает с ошибкой `ModuleNotFoundError: No module named 'httpx'` при импорте `app.py`.
 >
 > Быстрая проверка, что всё установлено:
 > ```bash
@@ -243,7 +243,7 @@ LOG_LEVEL=INFO
 
 **`ModuleNotFoundError: No module named 'httpx'` (падение при старте uvicorn)**
 
-Причина: в виртуальном окружении не установлен асинхронный HTTP-клиент `httpx`, который требуется модулю `services/gigachat_client.py` (импортируется на этапе загрузки `app.py`).
+Причина: в виртуальном окружении не установлен асинхронный HTTP-клиент `httpx`, который требуется модулю `services/image_search_service.py` (импортируется на этапе загрузки `app.py`).
 
 Решение: активируйте то же venv, в котором запускаете сервер, и установите зависимости из актуального `requirements.txt`:
 
@@ -515,6 +515,8 @@ http://<IP_СЕРВЕРА>:8000
 | Вход/регистрация | `/login` | Форма авторизации по email/паролю и регистрации |
 | Главная | `/` | Таблица всех постов (доступна после входа) |
 | Контент-менеджер | `/content-manager` | Чат с ИИ-маркетологом и генерация контент-планов |
+| Онбординг | `/onboarding` | Мастер первого запуска для новых пользователей (после регистрации) |
+| Админ: тарифы | `/admin/tariffs-page` | Управление тарифными планами (JSON-API: `GET/POST /admin/tariffs`) — только для `is_admin` |
 | Админ-дашборд | `/admin` | Сводная статистика (пользователи, сообщества, посты) — только для `is_admin` |
 | Админ: пользователи | `/admin/users` | Список пользователей: статус (активен/заблокирован), **тарифный план** (название + стоимость, интерактивный dropdown назначения), блок/разблок/удаление/создание, переключение прав администратора |
 | Админ: сообщества | `/admin/communities` | Все привязанные сообщества: статус, блок/разблок/удаление, привязка нового сообщества к пользователю |
@@ -722,7 +724,11 @@ http://<IP_СЕРВЕРА>:8000/docs
 | `POST` | `/admin/communities/add` | Привязать сообщество к пользователю (email владельца, group_id, токен) | `is_admin` |
 | `POST` | `/admin/communities/{comm_id}/block` / `/unblock` / `/delete` | Блокировка/разблокировка/удаление сообщества | `is_admin` |
 | `GET`/`POST` | `/admin/settings` | Просмотр и сохранение настроек AI (провайдер, модели, температура) | `is_admin` |
-| `POST` | `/admin/settings/test` | Тест подключения к выбранному AI-провайдеру | `is_admin` |
+| `POST` | `/admin/settings/test-cloud` | Тест подключения к облачному провайдеру (GigaChat) | `is_admin` |
+| `POST` | `/admin/settings/test-gigachat-image` | Тест генерации изображения через GigaChat Image API | `is_admin` |
+| `GET` | `/admin/tariffs-page` | Страница управления тарифными планами | `is_admin` |
+| `GET`/`POST` | `/admin/tariffs` | JSON-API: список тарифов и создание/обновление плана | `is_admin` |
+| `DELETE` | `/admin/tariffs/{tariff_id}` | JSON-API: удалить тарифный план | `is_admin` |
 | `GET` | `/account-blocked` | Страница «Аккаунт заблокирован» (публичная) | нет |
 | `GET` | `/no-admin-access` | Страница «Доступ запрещён» для пользователей без прав админа (публичная, редирект с GET /admin*) | нет |
 
@@ -743,6 +749,14 @@ http://<IP_СЕРВЕРА>:8000/docs
 | `POST` | `/api/generate/{period_type}` | Генерация пакета постов в фоне (`week`/`two_weeks`/`month`; `weekly` — обратная совместимость) | ниша фиксирована: `3d_cookies` |
 | `DELETE` | `/api/posts/{post_id}` | Удалить пост (`draft`/`approved`; published — нельзя) | path: `post_id`; требует авторизацию |
 | `POST` | `/api/posts/{post_id}/approve` | Одобрить черновик (`draft → approved`) | path: `post_id` |
+| `PUT` | `/api/posts/{post_id}` | Обновить пост (текст/статус; поле `images` заменяет связи PostImage) | path: `post_id`; JSON-body |
+| `POST` | `/api/posts/{post_id}/images` | Заменить список изображений поста с упорядочиванием | path: `post_id`; JSON-body |
+| `POST` | `/api/posts/{post_id}/assign-images` | Гибридно назначить изображения по политике тарифа (upload → AI → web-поиск) | path: `post_id` |
+| `POST` | `/api/upload-image` | Загрузить изображение пользователя (multipart/form-data, в `data/media/`) | да |
+| `GET` | `/api/search-images` | Поиск изображений в интернете (SerpApi / mock picsum.photos) | query: `q`, `limit`; да |
+| `GET` | `/api/tariff-info` | Тарифный план текущего пользователя и его лимиты | да |
+| `GET` | `/api/generate/active` | Активная/последняя фоновая задача генерации пользователя | да |
+| `GET` | `/api/generate/status/{task_id}` | Статус фоновой задачи генерации (polling) | да |
 | `POST` | `/api/publish/vk/{post_id}` | Опубликовать через CommunityManager | path: `post_id`, query: `group_id` (опц.) |
 | `GET` | `/api/status` | Проверка работоспособности API | — |
 
@@ -771,6 +785,18 @@ http://<IP_СЕРВЕРА>:8000/docs
 | `DELETE` | `/api/content-manager/period/{id}` | Удалить период с постами и чатом (published/scheduled блокируют) | да |
 | `POST` | `/api/content-manager/check-expiring` | Проверить истекающие планы | да |
 | `GET` | `/api/content-manager/period/{id}/posts` | Посты периода | да |
+| `POST` | `/api/content-manager/chat-options` | Подбор кнопок быстрых ответов под сообщение ИИ | да; JSON-body |
+
+**Контекст сообщества и онбординг:**
+
+| Метод | Путь | Описание | Авторизация |
+|-------|------|----------|-------------|
+| `GET` | `/api/community/{community_id}/context` | Настройки генерации сообщества (создаёт пустые, если нет) | да |
+| `POST` | `/api/community/{community_id}/context` | Сохранить контекст/стратегию сообщества | да; JSON-body |
+| `GET` | `/api/onboarding/status` | Нужен ли онбординг + список сообществ пользователя | да |
+| `POST` | `/api/onboarding/select-community` | Шаг 2: выбор сообщества + запуск фонового парсинга | да; JSON-body |
+| `GET` | `/api/onboarding/parse-status/{task_id}` | Статус фоновой задачи парсинга (polling) | да |
+| `POST` | `/api/onboarding/chat` | Диалог с AI-консьержем для настройки сообщества | да; JSON-body |
 
 ### Примеры запросов cURL
 
@@ -902,8 +928,13 @@ autopilot-content/
 ├── services/                   # Бизнес-логика
 │   ├── content_service.py      # generate_weekly_pack(): пак постов (week/two_weeks/month)
 │   ├── content_manager_service.py  # Чат с ИИ, планы, автообновление
+│   ├── context_strategy_service.py # Контекст/стратегия сообщества для промптов
 │   ├── gigachat_client.py      # GigaChatClient: OAuth-токен (кэш), chat/completions, images/generations
-│   └── scheduler.py            # APScheduler: check_and_publish() каждые 30 мин (+пропуск заблокированных)
+│   ├── image_search_service.py # Поиск картинок: SerpApi (httpx) / mock-режим picsum.photos
+│   ├── onboarding_service.py   # Онбординг новых пользователей (мастер первого запуска)
+│   ├── scheduler.py            # APScheduler: check_and_publish() каждые 30 мин (+пропуск заблокированных)
+│   ├── tariff_service.py       # Тарифные планы: лимиты, политика изображений, assign_images_to_post
+│   └── vk_analytics_service.py # Сбор статистики постов VK (PostStats)
 │
 ├── scripts/                    # CLI-скрипты
 │   ├── generate_post.py        # Генерация одиночного поста
@@ -918,13 +949,16 @@ autopilot-content/
 │   └── templates/              # Jinja2-шаблоны
 │       ├── index.html          # Главная (таблица постов)
 │       ├── login.html          # Вход/регистрация
+│       ├── onboarding.html     # Мастер онбординга нового пользователя
 │       ├── content_manager.html# Интерфейс контент-менеджера (чат + периоды)
 │       ├── admin_base.html     # Каркас админ-панели (сайдбар, навигация)
 │       ├── admin_dashboard.html# Админ: сводная статистика
 │       ├── admin_users.html    # Админ: пользователи (статус, блок/разблок/удалить/добавить, права)
 │       ├── admin_communities.html # Админ: все сообщества (статус, блок/удаление, добавление)
 │       ├── admin_settings.html # Админ: настройки AI (Ollama/GigaChat, модели, температура)
-│       └── account_blocked.html # Страница «Аккаунт заблокирован»
+│       ├── admin_tariffs.html  # Админ: управление тарифными планами
+│       ├── account_blocked.html # Страница «Аккаунт заблокирован»
+│       └── no_admin_access.html # Страница «Нет доступа к админке»
 │
 └── data/                       # Данные (каталог создаётся автоматически)
     └── autopilot.db            # SQLite база данных
@@ -940,8 +974,8 @@ autopilot-content/
 | `models.py` | User, Session, UserCommunity, PlatformAccount, ContentPlan, Post, PostStats, ContentPlanPeriod, ChatMessage, SystemSetting |
 | `vk_errors.py` | create_vk_session (VK_API_VERSION=5.199), describe_api_error, with_retry, positive_group_id/owner_id_for_group, format_photo_attachment |
 | `generators/text_generator.py` | generate_text_ollama (qwen2.5:14b), generate_text_gigachat (через GigaChatClient), generate_text (диспетчер провайдеров: SystemSetting → .env) |
-| `generators/image_generator.py` | generate_kandinsky: облачная генерация через GigaChat Image API (url/b64_json → static/uploads/) либо локальная модель через Ollama |
-| `services/gigachat_client.py` | GigaChatClient (синглтон get_gigachat_client): POST /oauth (Basic auth + RqUID, кэш токена, буфер 60 с, asyncio.Lock, повтор при 401), POST /chat/completions, POST /images/generations, is_gigachat_configured(); логирование полных ответов Sber для отладки |
+| `generators/image_generator.py` | generate_kandinsky: облачная генерация через GigaChat Image API (url/b64_json → data/media/) либо локальная модель через Ollama |
+| `services/gigachat_client.py` | GigaChatClient (синглтон get_gigachat_client): POST /oauth (Basic auth + RqUID, кэш токена, буфер 60 с, синхронная блокировка threading.Lock, повтор при 401), POST /chat/completions, POST /images/generations, is_gigachat_configured(); логирование полных ответов Sber для отладки |
 | `publishers/vk_publisher.py` | VKPublisher: walls.post с загрузкой фото через docs.getMessagesUploadServer |
 | `managers/community_manager.py` | CommunityManager + CommunityAccount: register/unregister, publish_to_community, LongPoll-потоки, команды бота |
 | `services/content_service.py` | generate_weekly_pack(niche, db, period_type): план + пак постов по типам (PACK_PERIODS) |

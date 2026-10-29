@@ -14,12 +14,15 @@ python-dotenv
 # --- Database (SQLite) ---
 sqlalchemy
 
-# --- HTTP client ---
-# requests: все сетевые вызовы проекта (Ollama, Kandinsky/FusionBrain,
-# облачные OpenAI-совместимые API и синхронный клиент GigaChat API
-# services/gigachat_client.py). httpx НЕ требуется.
+# --- HTTP clients ---
+# requests (синхронный): Ollama, Kandinsky/FusionBrain и клиент GigaChat API
+# (services/gigachat_client.py).
+# httpx (асинхронный, обязателен): сервис поиска изображений в интернете
+# (services/image_search_service.py, httpx.AsyncClient — SerpApi / mock-режим).
+# Без httpx запуск падает с ModuleNotFoundError при импорте app.py.
 requests
 urllib3
+httpx>=0.24
 
 # --- Background scheduler ---
 apscheduler
