@@ -423,6 +423,12 @@ textarea { resize: vertical; }
     background: rgba(17, 24, 39, .55);
     backdrop-filter: blur(2px);
 }
+/* Исправление бага: модалка назначения тарифа (admin_users.html) открывалась
+   поверх вкладки пользователей и не скрывалась, т.к. .modal-overlay задаёт
+   display:flex без учёта класса hidden. Правило ниже гарантирует скрытие. */
+.modal-overlay.hidden {
+    display: none !important;
+}
 .modal-card {
     max-height: 85vh;
     overflow-y: auto;
