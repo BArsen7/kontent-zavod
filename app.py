@@ -1,6 +1,7 @@
 import asyncio  # FIX: Event loop unblocked — вынос синхронных операций в поток
 import json
 import logging
+import math  # FIX (wizard): ceil для расчёта постов периода по лимиту/неделю
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -3471,7 +3472,7 @@ def get_tariff_info(  # FIX: Event loop unblocked — синхронный ро�
                 "max_period_days": None,
                 "max_rubrics": None,
                 "max_posts_per_week": None,
-                "period_options": _wizard_period_options(None),
+                "period_options": _wizard_period_options(None, db=db, user_id=user.id),
                 "image_source_options": _wizard_image_source_options(False, []),
             },
         }
@@ -3493,7 +3494,7 @@ def get_tariff_info(  # FIX: Event loop unblocked — синхронный ро�
             "max_posts_per_month": plan.max_posts_per_month,
             # Готовые описания опций для фронтенда (мастер строит UI без
             # дублирования тарифной логики на JS):
-            "period_options": _wizard_period_options(plan),
+            "period_options": _wizard_period_options(plan, db=db, user_id=user.id),
             "image_source_options": _wizard_image_source_options(
                 plan.allows_images, sources
             ),
@@ -3526,16 +3527,79 @@ WIZARD_PERIOD_LABELS = {
 }
 
 
-def _wizard_period_options(plan: Optional[TariffPlan]) -> List[Dict[str, Any]]:
+def _wizard_period_options(
+    plan: Optional[TariffPlan],
+    db: Optional[Session] = None,
+    user_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     """Описывает карточки периода для Шага 1 мастера по правилам тарифа.
 
     Возвращает список [{value, label, days, posts, available, upgrade_hint}].
     Если план None или период короче/равен max_plan_horizon_days — карточка
     доступна; иначе frontend показывает 🔒 и тултип «Доступно в тарифе …».
+
+    FIX (wizard): подзаголовок карточек («N дней · до M постов») больше НЕ
+    берётся из статичных дефолтов PERIOD_INFO — объём M считается по активному
+    тарифу пользователя:
+      - недельный объём ограничен max_posts_per_week;
+      - общий объём периода дополнительно режется месячным лимитом
+        max_posts_per_month;
+      - если у пользователя уже есть активный ContentPlanPeriod нужного типа,
+        показываем фактическое число постов этого плана (то, что реально
+        будет сгенерировано).
     """
     options: List[Dict[str, Any]] = []
     labels = {"week": "📅 Неделя", "two_weeks": "📆 2 недели", "month": "🗓️ Месяц"}
     horizon = int(plan.max_plan_horizon_days) if plan is not None else None
+
+    # Фактическое число постов активного периода пользователя по типу плана.
+    # Нет БД/пользователя или нет активного плана — словарь пустой, используем
+    # расчётные значения из лимитов тарифа.
+    actual_posts: Dict[str, int] = {}
+    if db is not None and user_id is not None:
+        try:
+            active = (
+                db.query(ContentPlanPeriod)
+                .filter(
+                    ContentPlanPeriod.user_id == user_id,
+                    ContentPlanPeriod.status == "active",
+                )
+                .order_by(ContentPlanPeriod.start_date.desc())
+                .first()
+            )
+            if active is not None and active.period_type in ("week", "two_weeks", "month"):
+                # total_posts в модели отсутствует — считаем posts этого плана
+                # отдельным запросом (Post.content_plan_period_id).
+                real = (
+                    db.query(sa_func.count(Post.id))
+                    .filter(Post.content_plan_period_id == active.id)
+                    .scalar()
+                )
+                if real:
+                    actual_posts[active.period_type] = int(real)
+        except Exception as e:  # noqa: BLE001 — диагностика не должна ломать API
+            logger.warning("wizard: не удалось прочитать активный период: %s", e)
+
+    def _capped_posts(value: str) -> int:
+        """Объём периода по активному тарифу (soft-лимиты планов PERIOD_INFO)."""
+        info = _TARIFF_PERIOD_INFO[value]
+        posts = int(info["posts"])
+        if plan is not None:
+            # Сколько постов реально поместится за дни периода при частоте
+            # тарифа (ceil на случай неполной недели в периоде «месяц»).
+            per_week = int(plan.max_posts_per_week or 0)
+            if per_week > 0:
+                weeks = math.ceil(info["days"] / 7)
+                posts = min(posts, per_week * weeks)
+            per_month = int(plan.max_posts_per_month or 0)
+            if per_month > 0:
+                posts = min(posts, per_month)
+        # Активный план пользователя точнее расчёта — показываем его цифру.
+        real = actual_posts.get(value)
+        if real:
+            posts = real
+        return posts
+
     for value in ("week", "two_weeks", "month"):
         info = _TARIFF_PERIOD_INFO[value]
         available = True if horizon is None else info["days"] <= horizon
@@ -3543,7 +3607,7 @@ def _wizard_period_options(plan: Optional[TariffPlan]) -> List[Dict[str, Any]]:
             "value": value,
             "label": labels[value],
             "days": info["days"],
-            "posts": info["posts"],
+            "posts": _capped_posts(value),
             "available": available,
             # Подсказка для заблокированной карточки: ищем следующий по
             # длине горизонта тариф, в котором этот период уже доступен.
