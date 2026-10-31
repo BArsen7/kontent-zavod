@@ -628,7 +628,10 @@
         let wizardStep = 1;              // активный шаг мастера
         let wizardState = {              // состояние всех 4 шагов
             periodType: 'week',
-            postsPerWeek: 3,
+            // FIX (wizard): null = «пользователь ещё не выбирал» — при загрузке
+            // лимитов мастера частота подставляется из активного тарифа
+            // (см. renderWizardPostButtons), а не берётся из хардкода.
+            postsPerWeek: null,
             rubrics: [],
             imageSources: [],
             styleNotes: '',
@@ -750,12 +753,17 @@
         // ---- Шаг 1: карточки периодов ---------------------------------------
         function renderWizardPeriodCards() {
             const container = document.getElementById('wizardPeriodCards');
-            const options = (wizardLimits && wizardLimits.period_options) || [
-                // Фолбэк на случай старого ответа API без period_options
-                { value: 'week', label: '📅 Неделя', days: 7, available: true },
-                { value: 'two_weeks', label: '📆 2 недели', days: 14, available: true },
-                { value: 'month', label: '🗓️ Месяц', days: 30, available: true },
-            ];
+            // FIX (wizard): подписи карточек («N дней · до M постов») берём
+            // ИСКЛЮЧИТЕЛЬНО из period_options ответа /api/tariff-info — они
+            // рассчитаны на бэкенде по активному тарифу пользователя.
+            // Если лимиты ещё не загружены — НЕ показываем статичные дефолты
+            // (7/14/30), а оставляем заглушку до загрузки тарифа.
+            if (!wizardLimits || !Array.isArray(wizardLimits.period_options) ||
+                wizardLimits.period_options.length === 0) {
+                container.innerHTML = '<div class="text-gray-500 text-sm">Загрузка лимитов тарифа…</div>';
+                return;
+            }
+            const options = wizardLimits.period_options;
             container.innerHTML = options.map(o => {
                 const selected = wizardState.periodType === o.value;
                 // Недоступный период: полупрозрачная карточка + 🔒 + тултип
@@ -806,8 +814,17 @@
                 else if (overLimit) cls.push('over-limit');
                 return `<button type="button" class="${cls.join(' ')}" onclick="selectWizardPosts(${n})">${n}</button>`;
             }).join('');
-            // Динамический текст «Выбрано: X. Лимит тарифа: Y»
-            const chosen = wizardState.postsPerWeek;
+            // Динамический текст «Выбрано: X. Лимит тарифа: Y».
+            // FIX (wizard): если пользователь выбрал частоту, но ещё не открывал
+            // Шаг 2 — по умолчанию показываем лимит активного тарифа (или первую
+            // доступную карточку), а не хардкод-дефолт.
+            let chosen = wizardState.postsPerWeek;
+            if ((chosen == null) && limit != null) {
+                chosen = Math.min(5, Math.max(1, limit));
+                wizardState.postsPerWeek = chosen;
+            } else if (chosen == null) {
+                chosen = 3; // нет тарифа — ограничений нет, просто нейтральное число
+            }
             const isOver = limit != null && chosen > limit;
             if (limit == null) {
                 hintEl.innerHTML = `Выбрано: <b>${chosen}</b>. Ограничений тарифа нет.`;
