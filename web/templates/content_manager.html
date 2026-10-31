@@ -182,6 +182,13 @@
                             <button id="editContextBtn" onclick="openContextModal()" class="hidden bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-medium py-1 px-3 rounded-md border border-gray-300 transition duration-200 whitespace-nowrap flex-shrink-0 ml-2">
                                 ⚙️ Редактировать настройки
                             </button>
+                            <!-- FIX (wizard): мастер настройки генерации — дополняет
+                                 чат, не заменяет его: пошаговная настройка с контролем
+                                 лимитов тарифа на этапе ввода данных -->
+                            <button id="openWizardBtn" onclick="openWizard()" title="4 шага: горизонт → частота → рубрики → медиа"
+                                    class="bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold py-1 px-3 rounded-md transition duration-200 whitespace-nowrap flex-shrink-0 ml-2">
+                                🧙 Настроить план через мастер
+                            </button>
                         </div>
                     </div>
 
@@ -309,6 +316,113 @@
                             class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-semibold disabled:opacity-50">
                         💾 Сохранить настройки
                     </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- =====================================================================
+         FIX (wizard): Пошаговый мастер (Wizard) настройки генерации
+         контент-плана — 4 шага с «мягкими ограничениями» тарифа.
+
+         Логика контроля лимитов:
+           - при открытии мастер загружает GET /api/tariff-info (лимиты и
+             готовые описания опций period_options / image_source_options);
+           - Шаг 1: недоступные по max_period_days периоды — полупрозрачные
+             карточки с 🔒 и тултипом «Доступно в тарифе …»;
+           - Шаг 2: soft cap — выбор постов выше max_posts_per_week НЕ
+             блокируется, но подсвечивается .limit-warning, а «Далее»
+             показывает предупреждение с предложением апгрейда;
+           - Шаг 3: жёсткий cap на UI — [+ Добавить] disabled при достижении
+             max_rubrics (счётчик «Добавлено X из Y»);
+           - Шаг 4: источники вне allowed_image_sources — disabled + 🔒;
+           - финальный POST /api/content-manager/wizard/generate повторно
+             валидирует настройки через tariff_service на бэкенде (403 с
+             понятным текстом), даже если запрос пришёл в обход UI.
+         ===================================================================== -->
+    <div id="wizardModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center z-50">
+        <div class="bg-white rounded-lg w-full mx-4 shadow-lg wizard-card">
+            <!-- Заголовок мастера -->
+            <div class="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
+                <h3 class="text-lg font-semibold text-gray-800">🧙 Мастер настройки генерации контент-плана</h3>
+                <button onclick="closeWizard()" class="px-2 py-1 text-gray-500 hover:bg-gray-100 rounded-md text-xl leading-none" title="Закрыть мастер">&times;</button>
+            </div>
+
+            <!-- Индикатор прогресса (4 шага): классы .wizard-progress-step
+                 is-done / is-active обновляются JS-функцией updateWizardProgress() -->
+            <div class="wizard-progress" id="wizardProgress">
+                <div class="wizard-progress-step" data-step="1"><span class="wizard-progress-dot">1</span><span class="wizard-progress-label">Горизонт</span></div>
+                <div class="wizard-progress-step" data-step="2"><span class="wizard-progress-dot">2</span><span class="wizard-progress-label">Частота</span></div>
+                <div class="wizard-progress-step" data-step="3"><span class="wizard-progress-dot">3</span><span class="wizard-progress-label">Рубрики</span></div>
+                <div class="wizard-progress-step" data-step="4"><span class="wizard-progress-dot">4</span><span class="wizard-progress-label">Медиа</span></div>
+            </div>
+
+            <div class="p-6 overflow-y-auto wizard-body">
+                <!-- Информация о текущем тарифе (подставляется из /api/tariff-info) -->
+                <div id="wizardTariffLine" class="text-xs text-gray-500 mb-4"></div>
+
+                <!-- ШАГ 1: Горизонт планирования -->
+                <div class="wizard-step" data-step="1">
+                    <h4 class="wizard-step-title">Шаг 1. Горизонт планирования</h4>
+                    <p class="text-sm text-gray-600 mb-3">На какой период строим контент-план?</p>
+                    <div id="wizardPeriodCards" class="grid grid-cols-3 gap-2">
+                        <div class="text-gray-500 text-sm">Загрузка лимитов тарифа…</div>
+                    </div>
+                </div>
+
+                <!-- ШАГ 2: Частота и объём -->
+                <div class="wizard-step" data-step="2">
+                    <h4 class="wizard-step-title">Шаг 2. Частота и объём</h4>
+                    <p class="text-sm text-gray-600 mb-3">Сколько постов публиковать в неделю?</p>
+                    <div id="wizardPostButtons" class="flex flex-wrap gap-2 mb-2"></div>
+                    <!-- Динамическая строка «Выбрано: X. Лимит тарифа: Y» + предупреждение -->
+                    <div id="wizardPostsHint" class="text-sm text-gray-600"></div>
+                </div>
+
+                <!-- ШАГ 3: Конструктор рубрик -->
+                <div class="wizard-step" data-step="3">
+                    <h4 class="wizard-step-title">Шаг 3. Конструктор рубрик</h4>
+                    <p class="text-sm text-gray-600 mb-3">Добавьте рубрики — ИИ будет придерживаться их при генерации.</p>
+                    <div class="flex gap-2 mb-3">
+                        <input type="text" id="wizardRubricInput" maxlength="120" placeholder="Например: Полезные советы"
+                               class="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                        <button id="wizardAddRubricBtn" onclick="addWizardRubric()"
+                                class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-md transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed">
+                            + Добавить
+                        </button>
+                    </div>
+                    <!-- Удаляемые теги-рубрики (chips) -->
+                    <div id="wizardRubricChips" class="flex flex-wrap gap-2 mb-2"></div>
+                    <!-- Счётчик «Добавлено X из Y возможных рубрик» -->
+                    <div id="wizardRubricCounter" class="text-sm text-gray-600"></div>
+                </div>
+
+                <!-- ШАГ 4: Медиа и стиль + финальная сводка -->
+                <div class="wizard-step" data-step="4">
+                    <h4 class="wizard-step-title">Шаг 4. Медиа и стиль</h4>
+                    <p class="text-sm text-gray-600 mb-3">Откуда брать картинки для постов?</p>
+                    <div id="wizardImageSources" class="space-y-2 mb-4">
+                        <div class="text-gray-500 text-sm">Загрузка…</div>
+                    </div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Пожелания к стилю (необязательно)</label>
+                    <textarea id="wizardStyleNotes" rows="2" placeholder="Например: лёгкий тон, без канцелярита, больше вопросов к аудитории…"
+                              class="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y"></textarea>
+
+                    <!-- Финальная сводка выбранных настроек -->
+                    <div class="wizard-summary mt-4">
+                        <div class="font-semibold text-gray-800 mb-2">📋 Сводка настроек</div>
+                        <div id="wizardSummaryContent"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Навигация мастера: Назад / Далее / Генерировать -->
+            <div class="px-6 py-4 border-t border-gray-200 flex justify-between items-center">
+                <button id="wizardBackBtn" onclick="wizardPrevStep()" class="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-md disabled:opacity-40 disabled:cursor-not-allowed">← Назад</button>
+                <div class="text-xs text-gray-400" id="wizardStepCounter">Шаг 1 из 4</div>
+                <div>
+                    <button id="wizardNextBtn" onclick="wizardNextStep()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-md font-semibold transition duration-200">Далее →</button>
+                    <button id="wizardGenerateBtn" onclick="runWizardGeneration()" class="hidden px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-md font-semibold transition duration-200 disabled:opacity-50">✅ Сгенерировать контент-план</button>
                 </div>
             </div>
         </div>
@@ -490,6 +604,395 @@
             }
             return true;
         }
+
+        // =====================================================================
+        // FIX (wizard): Пошаговый мастер (Wizard) настройки генерации
+        // контент-плана — 4 шага, «мягкие ограничения» тарифа.
+        //
+        // Источник лимитов — GET /api/tariff-info: limits.max_period_days,
+        // limits.max_rubrics, limits.max_posts_per_week,
+        // limits.allowed_image_sources + готовые описания опций
+        // period_options/image_source_options (тарифная логика на бэкенде).
+        //
+        // Принцип soft cap (Шаг 2): значения выше лимита НЕ блокируются —
+        // кнопка подсвечивается .limit-warning, а «Далее» показывает
+        // предупреждение с предложением апгрейда и даёт продолжить.
+        // Жёсткий cap только для рубрик (кнопка [+ Добавить] disabled при
+        // достижении max_rubrics) и картинок (🔒 disabled) — как в задании.
+        // =====================================================================
+        const WIZARD_TOTAL_STEPS = 4;
+        const WIZARD_PERIOD_LABELS = { week: '1 неделя', two_weeks: '2 недели', month: '1 месяц' };
+
+        let wizardLimits = null;         // limits из /api/tariff-info
+        let wizardTariffName = null;     // название текущего тарифа (для текстов)
+        let wizardStep = 1;              // активный шаг мастера
+        let wizardState = {              // состояние всех 4 шагов
+            periodType: 'week',
+            postsPerWeek: 3,
+            rubrics: [],
+            imageSources: [],
+            styleNotes: '',
+        };
+
+        async function loadTariffInfo() {
+            try {
+                const resp = await fetch(`${API_BASE}/api/tariff-info`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                wizardLimits = data.limits || {};
+                wizardTariffName = data.tariff ? data.tariff.name : null;
+                return data;
+            } catch (e) {
+                console.error('Ошибка загрузки лимитов тарифа:', e);
+                return null;
+            }
+        }
+
+        // ---- Открытие/закрытие мастера -------------------------------------
+        async function openWizard() {
+            // Лимиты подтягиваем каждый раз при открытии — админ мог сменить
+            // тариф, UI должен отразить актуальные ограничения сразу.
+            const info = await loadTariffInfo();
+            if (!info) {
+                showToast('Не удалось загрузить лимиты тарифа', true);
+                return;
+            }
+            // Если текущий выбор периода недоступен по тарифу — автоматически
+            // переключаемся на первую доступную карточку (обычно «1 неделя»).
+            const options = wizardLimits.period_options || [];
+            const currentOpt = options.find(o => o.value === wizardState.periodType);
+            const firstAvailable = options.find(o => o.available);
+            if (currentOpt && !currentOpt.available && firstAvailable) {
+                wizardState.periodType = firstAvailable.value;
+            }
+            renderWizardTariffLine();
+            renderWizardPeriodCards();
+            renderWizardPostButtons();
+            renderWizardRubrics();
+            renderWizardImageSources();
+            goToWizardStep(1);
+            const modal = document.getElementById('wizardModal');
+            // Порядок важен (как у других модалок): сначала убрать hidden, затем flex.
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+
+        function closeWizard() {
+            const modal = document.getElementById('wizardModal');
+            modal.classList.remove('flex');
+            modal.classList.add('hidden');
+        }
+
+        function renderWizardTariffLine() {
+            const line = document.getElementById('wizardTariffLine');
+            if (!line) return;
+            if (!wizardLimits || wizardLimits.max_rubrics === undefined) {
+                line.textContent = '';
+                return;
+            }
+            line.innerHTML = wizardTariffName
+                ? `Тариф: <b>${escapeHtml(wizardTariffName)}</b> · горизонт: ${wizardLimits.max_period_days} дн. · постов/нед: ${wizardLimits.max_posts_per_week} · рубрик: ${wizardLimits.max_rubrics}`
+                : 'Тариф не назначен — лимиты не применяются (доступны все опции).';
+        }
+
+        // ---- Переключение шагов и прогресс-бар ------------------------------
+        function goToWizardStep(step) {
+            wizardStep = Math.max(1, Math.min(WIZARD_TOTAL_STEPS, step));
+            // Прогрессивное раскрытие: показываем только активный блок .wizard-step
+            document.querySelectorAll('#wizardModal .wizard-step').forEach(el => {
+                el.classList.toggle('active', parseInt(el.dataset.step, 10) === wizardStep);
+            });
+            updateWizardProgress();
+            // Кнопки навигации: «Назад» неактивен на первом шаге, на последнем
+            // «Далее» заменяется на «Сгенерировать контент-план».
+            document.getElementById('wizardBackBtn').disabled = wizardStep === 1;
+            document.getElementById('wizardNextBtn').classList.toggle('hidden', wizardStep === WIZARD_TOTAL_STEPS);
+            document.getElementById('wizardGenerateBtn').classList.toggle('hidden', wizardStep !== WIZARD_TOTAL_STEPS);
+            document.getElementById('wizardStepCounter').textContent = `Шаг ${wizardStep} из ${WIZARD_TOTAL_STEPS}`;
+            if (wizardStep === WIZARD_TOTAL_STEPS) renderWizardSummary();
+        }
+
+        function updateWizardProgress() {
+            document.querySelectorAll('.wizard-progress-step').forEach(el => {
+                const n = parseInt(el.dataset.step, 10);
+                el.classList.toggle('is-active', n === wizardStep);
+                el.classList.toggle('is-done', n < wizardStep);
+            });
+        }
+
+        function wizardNextStep() {
+            if (wizardStep === 1 && !wizardState.periodType) {
+                showToast('Выберите горизонт планирования', true);
+                return;
+            }
+            if (wizardStep === 2) {
+                // Soft cap: превышение лимита постов НЕ блокирует переход,
+                // но пользователь обязан увидеть предупреждение с текстом
+                // про апгрейд — подтверждающий диалог («Далее»/«Отмена»).
+                const limit = wizardLimits ? wizardLimits.max_posts_per_week : null;
+                if (limit != null && wizardState.postsPerWeek > limit) {
+                    const proceed = confirm(
+                        `⚠️ Выбрано ${wizardState.postsPerWeek} постов(ов) в неделю — это больше лимита тарифа (${limit}).\n\n` +
+                        `Генерация может завершиться ошибкой «лимит превышен». Рекомендуем повысить тариф.\n` +
+                        `Всё равно продолжить настройку?`)
+                    // Отметим выбор предупреждающим стилем независимо от ответа
+                    renderWizardPostButtons();
+                    if (!proceed) return;
+                }
+            }
+            goToWizardStep(wizardStep + 1);
+        }
+
+        function wizardPrevStep() {
+            goToWizardStep(wizardStep - 1);
+        }
+
+        // ---- Шаг 1: карточки периодов ---------------------------------------
+        function renderWizardPeriodCards() {
+            const container = document.getElementById('wizardPeriodCards');
+            const options = (wizardLimits && wizardLimits.period_options) || [
+                // Фолбэк на случай старого ответа API без period_options
+                { value: 'week', label: '📅 Неделя', days: 7, available: true },
+                { value: 'two_weeks', label: '📆 2 недели', days: 14, available: true },
+                { value: 'month', label: '🗓️ Месяц', days: 30, available: true },
+            ];
+            container.innerHTML = options.map(o => {
+                const selected = wizardState.periodType === o.value;
+                // Недоступный период: полупрозрачная карточка + 🔒 + тултип
+                // «Доступно в тарифе …» (upgrade_hint приходит с бэкенда).
+                const cls = ['wizard-period-card'];
+                if (!o.available) cls.push('locked-option');
+                if (selected) cls.push('is-selected');
+                const lock = o.available ? '' : '<span class="wizard-lock">🔒</span>';
+                const title = o.available
+                    ? `${o.label}: ${o.days} дн., до ${o.posts} постов`
+                    : (o.upgrade_hint || 'Период недоступен в вашем тарифе');
+                return `<button type="button" data-period="${o.value}" data-available="${o.available ? '1' : '0'}"
+                            class="${cls.join(' ')}" title="${escapeHtml(title)}"
+                            onclick="selectWizardPeriod('${o.value}', ${o.available ? 'true' : 'false'})">
+                            ${lock}<span class="wizard-period-label">${escapeHtml(o.label)}</span>
+                            <span class="wizard-period-sub">${o.days} дней · до ${o.posts} постов</span>
+                        </button>`;
+            }).join('');
+        }
+
+        function selectWizardPeriod(value, available) {
+            if (!available) {
+                // Мягкое UX: клик по заблокированной карточке не выбирает период,
+                // а объясняет, где он доступен (текст тултипа — в тосте).
+                const opt = ((wizardLimits && wizardLimits.period_options) || [])
+                    .find(o => o.value === value);
+                showToast(opt && opt.upgrade_hint ? `🔒 ${opt.upgrade_hint}` : '🔒 Период недоступен в вашем тарифе', true);
+                return;
+            }
+            wizardState.periodType = value;
+            renderWizardPeriodCards();
+        }
+
+        // ---- Шаг 2: частота постов (soft cap) --------------------------------
+        function renderWizardPostButtons() {
+            const container = document.getElementById('wizardPostButtons');
+            const hintEl = document.getElementById('wizardPostsHint');
+            const limit = wizardLimits ? wizardLimits.max_posts_per_week : null;
+            const values = [1, 2, 3, 4, 5];
+            container.innerHTML = values.map(n => {
+                const selected = wizardState.postsPerWeek === n;
+                const overLimit = limit != null && n > limit;
+                const cls = ['wizard-post-btn'];
+                if (selected) cls.push('is-selected');
+                // Soft cap: значение > Y доступно для выбора, но подсвечивается
+                // предупреждающим цветом (.limit-warning), а не блокируется.
+                if (overLimit && selected) cls.push('limit-warning');
+                else if (overLimit) cls.push('over-limit');
+                return `<button type="button" class="${cls.join(' ')}" onclick="selectWizardPosts(${n})">${n}</button>`;
+            }).join('');
+            // Динамический текст «Выбрано: X. Лимит тарифа: Y»
+            const chosen = wizardState.postsPerWeek;
+            const isOver = limit != null && chosen > limit;
+            if (limit == null) {
+                hintEl.innerHTML = `Выбрано: <b>${chosen}</b>. Ограничений тарифа нет.`;
+                hintEl.classList.remove('limit-warning');
+            } else if (isOver) {
+                hintEl.innerHTML =
+                    `Выбрано: <b>${chosen}</b>. Лимит тарифа: <b>${limit}</b>. ` +
+                    `⚠️ Превышение лимита — рекомендуем повысить тариф ` +
+                    `(или уменьшить количество постов).`;
+                hintEl.classList.add('limit-warning');
+            } else {
+                hintEl.innerHTML = `Выбрано: <b>${chosen}</b>. Лимит тарифа: <b>${limit}</b>.`;
+                hintEl.classList.remove('limit-warning');
+            }
+        }
+
+        function selectWizardPosts(n) {
+            wizardState.postsPerWeek = n;
+            renderWizardPostButtons();
+        }
+
+        // ---- Шаг 3: конструктор рубрик ---------------------------------------
+        function renderWizardRubrics() {
+            const chipsEl = document.getElementById('wizardRubricChips');
+            const counterEl = document.getElementById('wizardRubricCounter');
+            const addBtn = document.getElementById('wizardAddRubricBtn');
+            const max = wizardLimits ? wizardLimits.max_rubrics : null;
+            const count = wizardState.rubrics.length;
+
+            chipsEl.innerHTML = wizardState.rubrics.map((r, i) =>
+                `<span class="tag-chip">${escapeHtml(r)}` +
+                `<button type="button" class="tag-chip-remove" title="Удалить рубрику" onclick="removeWizardRubric(${i})">&times;</button></span>`
+            ).join('') || '<span class="text-xs text-gray-400">Пока нет рубрик — добавьте первую.</span>';
+
+            // Счётчик «Добавлено X из Y возможных рубрик»
+            counterEl.textContent = max == null
+                ? `Добавлено ${count} рубрик (лимит тарифа не задан)`
+                : `Добавлено ${count} из ${max} возможных рубрик`;
+
+            // Жёсткая блокировка кнопки при достижении лимита max_rubrics —
+            // предотвращает 403 ещё на этапе ввода (в отличие от soft cap Шага 2).
+            const atLimit = max != null && count >= max;
+            addBtn.disabled = atLimit;
+            addBtn.title = atLimit ? `Лимит тарифа: ${max} рубрик` : 'Добавить рубрику';
+            document.getElementById('wizardRubricInput').placeholder = atLimit
+                ? 'Лимит рубрик исчерпан — удалите лишние'
+                : 'Например: Полезные советы';
+        }
+
+        function addWizardRubric() {
+            const input = document.getElementById('wizardRubricInput');
+            const name = (input.value || '').trim();
+            if (!name) { showToast('Введите название рубрики', true); return; }
+            // Дубликты (без учёта регистра) не добавляем — они бы «съели» лимит
+            if (wizardState.rubrics.some(r => r.toLowerCase() === name.toLowerCase())) {
+                showToast('Такая рубрика уже добавлена', true);
+                return;
+            }
+            const max = wizardLimits ? wizardLimits.max_rubrics : null;
+            if (max != null && wizardState.rubrics.length >= max) {
+                // Защита на случай гонки/обхода disabled-кнопки
+                showToast(`Лимит тарифа: ${max} рубрик. Удалите лишние или повысьте тариф.`, true);
+                return;
+            }
+            wizardState.rubrics.push(name.slice(0, 120));
+            input.value = '';
+            input.focus();
+            renderWizardRubrics();
+        }
+
+        function removeWizardRubric(index) {
+            wizardState.rubrics.splice(index, 1);
+            renderWizardRubrics();
+        }
+
+        // ---- Шаг 4: источники картинок + сводка ------------------------------
+        function renderWizardImageSources() {
+            const container = document.getElementById('wizardImageSources');
+            const options = (wizardLimits && wizardLimits.image_source_options) || [
+                { value: 'ai', label: '🤖 AI-генерация', available: false },
+                { value: 'web_search', label: '🔎 Поиск в web', available: false },
+                { value: 'user_upload', label: '📤 Мои загрузки', available: false },
+            ];
+            container.innerHTML = options.map(o => {
+                const checked = wizardState.imageSources.includes(o.value);
+                const lockCls = o.available ? '' : ' locked-option';
+                const lockIcon = o.available ? '' : ' <span class="wizard-lock-inline" title="Источник недоступен в текущем тарифе">🔒</span>';
+                return `<label class="wizard-toggle${lockCls}${checked ? ' is-checked' : ''}">
+                            <input type="checkbox" value="${o.value}" ${checked ? 'checked' : ''} ${o.available ? '' : 'disabled'}
+                                   onchange="toggleWizardImageSource('${o.value}', this.checked)">
+                            <span>${escapeHtml(o.label)}${lockIcon}</span>
+                        </label>`;
+            }).join('');
+        }
+
+        function toggleWizardImageSource(value, checked) {
+            // Заблокированные тарифом источники (disabled) сюда попасть не должны,
+            // но проверка обязательна — сервер вернул бы 403.
+            const opt = ((wizardLimits && wizardLimits.image_source_options) || [])
+                .find(o => o.value === value);
+            if (opt && !opt.available) {
+                showToast('🔒 Этот источник недоступен в текущем тарифе', true);
+                renderWizardImageSources();
+                return;
+            }
+            const set = new Set(wizardState.imageSources);
+            checked ? set.add(value) : set.delete(value);
+            wizardState.imageSources = [...set];
+            renderWizardImageSources();
+        }
+
+        function renderWizardSummary() {
+            wizardState.styleNotes = (document.getElementById('wizardStyleNotes').value || '').trim();
+            const limit = wizardLimits ? wizardLimits.max_posts_per_week : null;
+            const over = limit != null && wizardState.postsPerWeek > limit;
+            const rows = [
+                ['Горизонт', WIZARD_PERIOD_LABELS[wizardState.periodType] || wizardState.periodType],
+                ['Постов в неделю', `${wizardState.postsPerWeek}${limit != null ? ' (лимит: ' + limit + ')' : ''}${over ? ' ⚠️ превышение лимита' : ''}`],
+                ['Рубрики', wizardState.rubrics.length ? wizardState.rubrics.join(', ') : '— (без рубрик)'],
+                ['Источники картинок', wizardState.imageSources.length ? wizardState.imageSources.map(s => ({ ai: '🤖 ИИ', web_search: '🔎 Поиск', user_upload: '📤 Загрузки' }[s] || s)).join(', ') : '— (без картинок)'],
+                ['Стиль', wizardState.styleNotes || '— (по умолчанию)'],
+            ];
+            document.getElementById('wizardSummaryContent').innerHTML =
+                `<table class="wizard-summary-table"><tbody>` +
+                rows.map(([k, v]) => `<tr><td class="k">${escapeHtml(k)}</td><td class="v${over && k === 'Постов в неделю' ? ' limit-warning' : ''}">${escapeHtml(String(v))}</td></tr>`).join('') +
+                `</tbody></table>` +
+                (over ? `<div class="limit-warning mt-2">⚠️ Частота превышает лимит тарифа${wizardTariffName ? ' «' + escapeHtml(wizardTariffName) + '»' : ''}. Бэкенд может отклонить генерацию — рекомендуется апгрейд тарифа.</div>` : '');
+        }
+
+        // ---- Финальная генерация ---------------------------------------------
+        async function runWizardGeneration() {
+            const btn = document.getElementById('wizardGenerateBtn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Генерация...';
+            try {
+                // Собираем JSON всех 4 шагов; community_id — из селекта слева
+                // (мастер работает для того же сообщества, что и чат).
+                const payload = {
+                    period_type: wizardState.periodType,
+                    posts_per_week: wizardState.postsPerWeek,
+                    rubrics: wizardState.rubrics,
+                    image_sources: wizardState.imageSources,
+                    style_notes: (document.getElementById('wizardStyleNotes').value || '').trim(),
+                    community_id: selectedCommunityId(),
+                };
+                const response = await fetch(`${API_BASE}/api/content-manager/wizard/generate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    // Бэкенд валидирует лимиты через tariff_service: 403 с
+                    // понятным русским текстом detail — покажем его как есть.
+                    throw new Error(typeof result.detail === 'string'
+                        ? result.detail
+                        : 'Ошибка запуска генерации');
+                }
+                showToast(result.message || 'Контент-план создан!');
+                closeWizard();
+                // Интеграция: обновляем список периодов и открываем новый план
+                currentPeriodId = result.period ? result.period.id : currentPeriodId;
+                await loadPeriods();
+                if (result.period) {
+                    selectPeriod(result.period.id);
+                }
+                // Обновляем превью постов нового плана
+                await loadPeriodPosts();
+            } catch (error) {
+                showToast(error.message, true);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '✅ Сгенерировать контент-план';
+            }
+        }
+
+        // Enter в поле рубрики = нажать [+ Добавить]
+        document.addEventListener('DOMContentLoaded', () => {
+            const rubricInput = document.getElementById('wizardRubricInput');
+            if (rubricInput) {
+                rubricInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') { e.preventDefault(); addWizardRubric(); }
+                });
+            }
+        });
 
         // Utilities
         function showToast(message, isError = false) {
@@ -1181,13 +1684,17 @@
 
         // FIX (UI): закрытие модалок по Escape и клику на затемнённый фон
         document.addEventListener('keydown', function(e) {
-            if (e.key === 'Escape') { hidePostPreview(); hideContextModal(); }
+            if (e.key === 'Escape') { hidePostPreview(); hideContextModal(); closeWizard(); }
         });
         document.getElementById('postPreviewModal')?.addEventListener('click', function(e) {
             if (e.target === this) hidePostPreview();
         });
         document.getElementById('contextModal')?.addEventListener('click', function(e) {
             if (e.target === this) hideContextModal();
+        });
+        // FIX (wizard): закрытие мастера кликом по затемнённому фону
+        document.getElementById('wizardModal')?.addEventListener('click', function(e) {
+            if (e.target === this) closeWizard();
         });
     </script>
 </body>
