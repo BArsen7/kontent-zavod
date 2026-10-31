@@ -109,12 +109,15 @@ from services.content_manager_service import (
     update_existing_plan,
     check_and_regenerate_expiring_plan,
     detect_chat_buttons,
+    add_chat_message,
 )
 from services.image_search_service import search_images_web
 from services.tariff_service import (
     check_tariff_generation_limits,
     assign_images_to_post as _assign_images_to_post,
     get_user_tariff as _get_user_tariff,
+    parse_allowed_sources as _parse_allowed_sources,
+    PERIOD_INFO as _TARIFF_PERIOD_INFO,
 )
 # FIX (онбординг): AI-консьерж — диалоговая настройка CommunityGenerationContext
 import re as _re  # валидация имени сообщества из диалога консьержа
@@ -3462,12 +3465,18 @@ def get_tariff_info(  # FIX: Event loop unblocked — синхронный ро�
                 "allows_images": False,
                 "max_images_per_post": 0,
                 "allowed_image_sources": [],
+                # FIX (wizard): поля для пошагового мастера генерации.
+                # Без тарифа — безопасные дефолты: все периоды доступны
+                # (бэкенд лимиты не проверяет), рубрики/посты не ограничены.
+                "max_period_days": None,
+                "max_rubrics": None,
+                "max_posts_per_week": None,
+                "period_options": _wizard_period_options(None),
+                "image_source_options": _wizard_image_source_options(False, []),
             },
         }
-    try:
-        sources = json.loads(plan.allowed_image_sources) if plan.allowed_image_sources else []
-    except ValueError:
-        sources = []
+    # единый безопасный парсер JSON-строки allowed_image_sources (tariff_service)
+    sources = _parse_allowed_sources(plan)
     return {
         "has_tariff": True,
         "tariff": _serialize_tariff(plan),
@@ -3475,7 +3484,323 @@ def get_tariff_info(  # FIX: Event loop unblocked — синхронный ро�
             "allows_images": plan.allows_images,
             "max_images_per_post": plan.max_images_per_post or 0,
             "allowed_image_sources": sources,
+            # FIX (wizard): лимиты для пошагового мастера настройки генерации.
+            # max_period_days — дальность планирования (в UI-требованиях поле
+            # называлось max_period_days; в модели — max_plan_horizon_days).
+            "max_period_days": plan.max_plan_horizon_days,
+            "max_rubrics": plan.max_rubrics,
+            "max_posts_per_week": plan.max_posts_per_week,
+            "max_posts_per_month": plan.max_posts_per_month,
+            # Готовые описания опций для фронтенда (мастер строит UI без
+            # дублирования тарифной логики на JS):
+            "period_options": _wizard_period_options(plan),
+            "image_source_options": _wizard_image_source_options(
+                plan.allows_images, sources
+            ),
         },
+    }
+
+
+# =============================================================================
+# Пошаговый мастер (Wizard) настройки генерации контент-плана
+# =============================================================================
+# Мастер состоит из 4 шагов: горизонт -> частота/объём -> рубрики -> медиа/стиль.
+# Принцип «мягких ограничений» (soft caps): фронтенд получает полные описания
+# опций и подсвечивает превышения предупреждением вместо жёсткой блокировки
+# ввода; финальный POST /wizard/generate всё равно валидирует настройки через
+# tariff_service — это защита от прямого вызова API в обход UI (ошибка 403 с
+# понятным русскоязычным текстом возвращается до обращения к LLM).
+
+# Человеческие названия источников изображений для UI мастера.
+WIZARD_IMAGE_SOURCES = [
+    ("ai", "🤖 AI-генерация"),
+    ("web_search", "🔎 Поиск в web"),
+    ("user_upload", "📤 Мои загрузки"),
+]
+
+# Названия типов периодов для сводки/сообщений мастера.
+WIZARD_PERIOD_LABELS = {
+    "week": "1 неделя",
+    "two_weeks": "2 недели",
+    "month": "1 месяц",
+}
+
+
+def _wizard_period_options(plan: Optional[TariffPlan]) -> List[Dict[str, Any]]:
+    """Описывает карточки периода для Шага 1 мастера по правилам тарифа.
+
+    Возвращает список [{value, label, days, posts, available, upgrade_hint}].
+    Если план None или период короче/равен max_plan_horizon_days — карточка
+    доступна; иначе frontend показывает 🔒 и тултип «Доступно в тарифе …».
+    """
+    options: List[Dict[str, Any]] = []
+    labels = {"week": "📅 Неделя", "two_weeks": "📆 2 недели", "month": "🗓️ Месяц"}
+    horizon = int(plan.max_plan_horizon_days) if plan is not None else None
+    for value in ("week", "two_weeks", "month"):
+        info = _TARIFF_PERIOD_INFO[value]
+        available = True if horizon is None else info["days"] <= horizon
+        options.append({
+            "value": value,
+            "label": labels[value],
+            "days": info["days"],
+            "posts": info["posts"],
+            "available": available,
+            # Подсказка для заблокированной карточки: ищем следующий по
+            # длине горизонта тариф, в котором этот период уже доступен.
+            "upgrade_hint": None if available else _wizard_upgrade_hint(info["days"]),
+        })
+    return options
+
+
+def _wizard_upgrade_hint(days: int) -> str:
+    """Текст тултипа для недоступного периода: «Доступно в тарифе <Название>».
+
+    Название берём из первого тарифного плана (по возрастанию id), чей
+    max_plan_horizon_days покрывает запрошенную дальность. Если такого
+    плана нет — общая подсказка обратиться к администратору.
+    """
+    try:
+        from database import SessionLocal
+
+        s = SessionLocal()
+        try:
+            plan = (
+                s.query(TariffPlan)
+                .filter(TariffPlan.max_plan_horizon_days >= days)
+                .order_by(TariffPlan.max_plan_horizon_days.asc(), TariffPlan.id.asc())
+                .first()
+            )
+        finally:
+            s.close()
+        if plan is not None:
+            return f"Доступно в тарифе «{plan.name}»"
+    except Exception as e:  # noqa: BLE001 — подсказка не должна ломать API
+        logger.warning("wizard: не удалось подобрать тариф для подсказки: %s", e)
+    return "Обратитесь к администратору для смены тарифа"
+
+
+def _wizard_image_source_options(allows_images: bool, allowed_sources: List[str]) -> List[Dict[str, Any]]:
+    """Описывает переключатели источников картинок для Шага 4 мастера.
+
+    Источник доступен, только если тариф разрешает картинки в принципе
+    (allows_images) И источник перечислен в allowed_image_sources.
+    """
+    allowed = set(allowed_sources or [])
+    return [
+        {
+            "value": value,
+            "label": label,
+            "available": bool(allows_images) and value in allowed,
+        }
+        for value, label in WIZARD_IMAGE_SOURCES
+    ]
+
+
+class WizardGenerateRequest(BaseModel):
+    """Тело запроса мастера: настройки 4 шагов генерации контент-плана."""
+
+    period_type: str                      # Шаг 1: week | two_weeks | month
+    posts_per_week: Optional[int] = None  # Шаг 2: желаемая частота постов
+    rubrics: List[str] = []               # Шаг 3: названия рубрик (chips)
+    image_sources: List[str] = []         # Шаг 4: ai | web_search | user_upload
+    style_notes: Optional[str] = None     # Шаг 4: дополнительные пожелания к стилю
+    community_id: Optional[int] = None    # сообщество (UserCommunity.id), как в period/create
+
+
+def _validate_wizard_settings(
+    db: Session, user: User, payload: WizardGenerateRequest
+) -> Dict[str, Any]:
+    """Валидирует настройки мастера через лимиты тарифа ДО запуска генерации.
+
+    Бросает HTTPException с понятным русским текстом:
+      400 — некорректные значения (неизвестный период/источник, пустые рубрики);
+      403 — превышены лимиты тарифа (горизонт, посты/неделю, рубрики, картинки).
+    Если тариф не назначен — ограничения не применяются (как в tariff_service),
+    но синтаксическая корректность значений проверяется всегда.
+
+    Returns:
+        dict с фактами проверки (тарифная диагностика + нормализованные поля).
+    """
+    period_type = (payload.period_type or "").strip().lower()
+    if period_type not in _TARIFF_PERIOD_INFO:
+        raise HTTPException(
+            status_code=400,
+            detail="Недопустимый период. Доступно: week, two_weeks, month",
+        )
+
+    # --- Шаг 3: рубрики (нормализация + лимит max_rubrics) ------------------
+    rubrics: List[str] = []
+    seen = set()
+    for raw in payload.rubrics or []:
+        name = str(raw).strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue  # дубликты не считаем за отдельные рубрики
+        seen.add(key)
+        rubrics.append(name[:120])
+
+    # --- Шаг 4: источники изображений ---------------------------------------
+    valid_sources = {value for value, _ in WIZARD_IMAGE_SOURCES}
+    image_sources: List[str] = []
+    for raw in payload.image_sources or []:
+        src = str(raw).strip()
+        if src and src not in valid_sources:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Неизвестный источник изображений '{src}'. "
+                       f"Допустимо: {sorted(valid_sources)}",
+            )
+        if src and src not in image_sources:
+            image_sources.append(src)
+
+    plan = _get_user_tariff(db, user)
+    if plan is not None:
+        # Лимит рубрик: блокируем и на фронтенде (disabled кнопки [+ Добавить]),
+        # но серверная проверка обязательна — защита от прямого вызова API.
+        max_rubrics = int(plan.max_rubrics or 0)
+        if len(rubrics) > max_rubrics:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Превышен лимит тарифного плана «{plan.name}»: "
+                    f"можно не более {max_rubrics} рубрик, добавлено {len(rubrics)}. "
+                    f"Удалите лишние рубрики или повысьте тариф."
+                ),
+            )
+        # Разрешённые источники картинок: запрещённые тарифом источники
+        # (на фронтенде — 🔒) не должны пройти и здесь.
+        if image_sources:
+            allowed = set(_parse_allowed_sources(plan)) if plan.allows_images else set()
+            forbidden = [s for s in image_sources if s not in allowed]
+            if forbidden:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"Тарифный план «{plan.name}» не разрешает источники "
+                        f"изображений: {', '.join(forbidden)}. "
+                        f"Разрешено: {', '.join(sorted(allowed)) or 'нет'}. "
+                        f"Снимите отметки или повысьте тариф."
+                    ),
+                )
+
+    # Горизонт периода и количество постов — через общий тарифный сервис
+    # (check_tariff_generation_limits бросает 403 с готовым текстом ошибки).
+    tariff_check = check_tariff_generation_limits(db, user, period_type)
+
+    return {
+        "period_type": period_type,
+        "posts_per_week": payload.posts_per_week,
+        "rubrics": rubrics,
+        "image_sources": image_sources,
+        "style_notes": (payload.style_notes or "").strip() or None,
+        "community_id": payload.community_id,
+        "tariff_check": tariff_check,
+    }
+
+
+@app.post("/api/content-manager/wizard/generate")
+async def wizard_generate_content_plan(
+    payload: WizardGenerateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Мастер настройки генерации: сохраняет контекст и запускает генерацию плана.
+
+    Порядок работы:
+      1) Валидация всех настроек мастера через лимиты тарифа (403 — до LLM).
+      2) Сохранение выбранных источников картинок в CommunityGenerationContext
+         сообщества (если сообщество выбрано) — они сузируют разрешения тарифа
+         при гибридном назначении картинок.
+      3) Создание/получение периода контент-плана выбранного типа.
+      4) Формирование стартового сообщения чата из настроек мастера (рубрики,
+         частота, стиль) — чтобы генерация пошла по этим параметрам, и чтобы
+         история диалога осталась связной с чатом контент-менеджера.
+      5) Генерация плана (синхронный LLM-вызов вынесен в поток).
+    """
+    user = require_auth(request, db)
+    settings = _validate_wizard_settings(db, user, payload)
+
+    # (2) Сообщество: проверяем принадлежность и сохраняем предпочтения картинок
+    uc: Optional[UserCommunity] = None
+    if settings["community_id"]:
+        uc = db.query(UserCommunity).filter(
+            UserCommunity.id == settings["community_id"],
+            UserCommunity.user_id == user.id,
+        ).first()
+        if uc is None:
+            raise HTTPException(status_code=404, detail="Сообщество не найдено")
+        if settings["image_sources"]:
+            ctx = get_or_create_generation_context(db, uc.id)
+            ctx.image_source_preferences = json.dumps(
+                settings["image_sources"], ensure_ascii=False
+            )
+            db.commit()
+
+    # (3) Период: community_info — как в существующем /period/create
+    if uc is not None:
+        community_info = json.dumps(
+            {
+                "period_community_id": uc.id,
+                "group_name": uc.group_name or f"Сообщество {uc.group_id}",
+                "group_id": uc.group_id,
+            },
+            ensure_ascii=False,
+        )
+    else:
+        community_info = get_user_community_info(db, user.id)
+
+    period = get_or_create_content_plan_period(
+        db=db,
+        user_id=user.id,
+        period_type=settings["period_type"],
+        community_info=community_info,
+    )
+
+    # (4) Настройки мастера транслируем в чат как реплику пользователя —
+    # generate_content_plan_from_chat строит промпт по истории чата.
+    lines = [
+        "Настройки из мастера генерации контент-плана:",
+        f"— Горизонт: {WIZARD_PERIOD_LABELS.get(settings['period_type'], settings['period_type'])}",
+    ]
+    if settings["posts_per_week"]:
+        lines.append(f"— Частота публикаций: {settings['posts_per_week']} постов(ов) в неделю")
+    if settings["rubrics"]:
+        lines.append("— Рубрики: " + ", ".join(settings["rubrics"]))
+    if settings["image_sources"]:
+        src_labels = dict(WIZARD_IMAGE_SOURCES)
+        lines.append(
+            "— Источники картинок: "
+            + ", ".join(src_labels.get(s, s) for s in settings["image_sources"])
+        )
+    if settings["style_notes"]:
+        lines.append("— Стиль и пожелания: " + settings["style_notes"])
+    wizard_message = "\n".join(lines)
+    add_chat_message(db, period.id, "user", wizard_message)
+
+    # (5) Генерация: event loop не блокируем (requests.post внутри сервиса)
+    posts = await asyncio.to_thread(generate_content_plan_from_chat, db, period.id, user.id)
+
+    return {
+        "success": True,
+        "message": f"Создано {len(posts)} постов",
+        "period": {
+            "id": period.id,
+            "period_type": period.period_type,
+            "title": period.title or "",
+            "start_date": period.start_date.isoformat(),
+            "end_date": period.end_date.isoformat(),
+            "status": period.status,
+        },
+        "posts": posts,
+        "settings": {
+            "period_type": settings["period_type"],
+            "posts_per_week": settings["posts_per_week"],
+            "rubrics": settings["rubrics"],
+            "image_sources": settings["image_sources"],
+        },
+        "tariff": settings["tariff_check"],  # диагностика применённых лимитов
     }
 
 

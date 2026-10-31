@@ -490,3 +490,208 @@ tr.row-flash > td { animation: row-flash-kf 2s ease-out forwards; }
     margin-bottom: 1rem;
 }
 .bulk-bar.hidden { display: none; }
+
+/* =============================================================================
+   FIX (wizard): Пошаговый мастер (Wizard) настройки генерации контент-плана.
+   Стиль повторяет существующие паттерны styles.css: палитра Tailwind-утилит
+   (blue-600/gray-*/amber/red), скругления .375–.6rem, отступы rem.
+   ============================================================================= */
+
+/* Модальное окно мастера: перекрывает .modal-overlay-подход — здесь используется
+   класс fixed/inset-0/flex из утилит; карточка ограничена по высоте и скроллит
+   тело (.wizard-body), чтобы шаги помещались на небольших экранах. */
+.wizard-card {
+    max-width: 42rem;            /* шире обычных модалок — 4 шага + сводка */
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    animation: modal-pop .18s ease-out;   /* та же анимация, что у modal-card */
+}
+.wizard-body { flex: 1 1 auto; min-height: 0; }
+
+/* Прогресс-бар (индикатор 4 шагов): активный шаг — синий, пройденные —
+   зелёные с галочкой вместо номера (прогрессивное раскрытие информации). */
+.wizard-progress {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .5rem;
+    padding: .9rem 1.5rem;
+    border-bottom: 1px solid #e5e7eb;
+    background: #f9fafb;
+}
+.wizard-progress-step {
+    display: flex;
+    align-items: center;
+    gap: .45rem;
+    font-size: .8rem;
+    color: #9ca3af;
+    flex: 1 1 0;
+    position: relative;
+}
+.wizard-progress-dot {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    border-radius: 9999px;
+    background: #e5e7eb;
+    color: #6b7280;
+    font-weight: 700;
+    font-size: .78rem;
+    flex-shrink: 0;
+    transition: background-color .2s ease, color .2s ease;
+}
+.wizard-progress-step.is-active { color: #1f2937; font-weight: 600; }
+.wizard-progress-step.is-active .wizard-progress-dot { background: #2563eb; color: #fff; }
+.wizard-progress-step.is-done { color: #166534; }
+.wizard-progress-step.is-done .wizard-progress-dot { background: #dcfce7; color: #16a34a; }
+/* Галочка «выполнено» вместо номера шага */
+.wizard-progress-step.is-done .wizard-progress-dot::after { content: "✓"; }
+.wizard-progress-step.is-done .wizard-progress-dot { font-size: 0; }
+.wizard-progress-step.is-done .wizard-progress-dot::after { font-size: .8rem; }
+/* Соединительная линия между шагами */
+.wizard-progress-step:not(:last-child)::before {
+    content: "";
+    flex: 1 1 auto;
+    height: 2px;
+    background: #e5e7eb;
+    margin-right: .45rem;
+    order: -1;
+    min-width: .75rem;
+}
+.wizard-progress-step:first-child::before { display: none; }
+.wizard-progress-label { white-space: nowrap; }
+
+/* Шаги мастера: скрыты по умолчанию, активный раскрывается классом .active */
+.wizard-step { display: none; }
+.wizard-step.active { display: block; animation: wizard-fade .2s ease-out; }
+@keyframes wizard-fade { from { opacity: 0; transform: translateX(8px); } to { opacity: 1; transform: none; } }
+.wizard-step-title { font-size: 1rem; font-weight: 700; color: #1f2937; margin-bottom: .35rem; }
+
+/* Шаг 1: карточки периодов */
+.wizard-period-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: .25rem;
+    text-align: left;
+    padding: .8rem .9rem;
+    border: 2px solid #e5e7eb;
+    border-radius: .5rem;
+    background: #fff;
+    transition: border-color .15s ease, box-shadow .15s ease, transform .1s ease;
+}
+.wizard-period-card:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,.08); }
+.wizard-period-card.is-selected { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+.wizard-period-label { font-size: .9rem; font-weight: 600; color: #1f2937; }
+.wizard-period-sub { font-size: .72rem; color: #6b7280; }
+
+/* Заблокированные тарифом опции (locked-option): полупрозрачность + замок.
+   Применяется к карточкам периодов (Шаг 1) и переключателям картинок (Шаг 4). */
+.locked-option {
+    opacity: .45;
+    cursor: not-allowed;
+    background: #f9fafb;
+    border-style: dashed;
+}
+.locked-option:hover { transform: none; box-shadow: none; }
+.wizard-lock {
+    position: absolute;
+    top: .35rem;
+    right: .45rem;
+    font-size: .85rem;
+}
+.wizard-lock-inline { font-size: .85rem; margin-left: .2rem; }
+
+/* Шаг 2: кнопки частоты постов */
+.wizard-post-btn {
+    width: 2.6rem;
+    height: 2.6rem;
+    border: 2px solid #e5e7eb;
+    border-radius: .5rem;
+    background: #fff;
+    font-weight: 700;
+    color: #374151;
+    transition: border-color .15s ease, background-color .15s ease;
+}
+.wizard-post-btn:hover { border-color: #93c5fd; }
+.wizard-post-btn.is-selected { border-color: #2563eb; background: #eff6ff; color: #1d4ed8; }
+/* Значения выше лимита — мягкая янтарная подсветка (soft cap, не блокировка) */
+.wizard-post-btn.over-limit { border-color: #fcd34d; color: #92400e; }
+
+/* Предупреждение о превышении лимита тарифа (amber — тот же тон, что
+   bg-amber-50/text-amber-800 на странице входа) */
+.limit-warning {
+    color: #92400e;
+    background: #fffbeb;
+    border: 1px solid #fcd34d;
+    border-radius: .375rem;
+    padding: .35rem .6rem;
+    font-size: .82rem;
+}
+/* Для кнопок-значений: только рамка/фон без отступов таблицы-предупреждения */
+.wizard-post-btn.limit-warning { background: #fffbeb; border-color: #f59e0b; color: #92400e; }
+#wizardPostsHint.limit-warning { margin-top: .25rem; }
+
+/* Шаг 3: теги-рубрики (chips) */
+.tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: .35rem;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    color: #1d4ed8;
+    font-size: .82rem;
+    font-weight: 500;
+    padding: .3rem .6rem;
+    border-radius: 9999px;
+}
+.tag-chip-remove {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.1rem;
+    height: 1.1rem;
+    border-radius: 9999px;
+    background: transparent;
+    color: #1d4ed8;
+    font-size: .95rem;
+    line-height: 1;
+    transition: background-color .15s ease, color .15s ease;
+}
+.tag-chip-remove:hover { background: #dbeafe; color: #b91c1c; }
+
+/* Шаг 4: переключатели источников картинок */
+.wizard-toggle {
+    display: flex;
+    align-items: center;
+    gap: .6rem;
+    padding: .55rem .8rem;
+    border: 1px solid #e5e7eb;
+    border-radius: .5rem;
+    background: #fff;
+    font-size: .88rem;
+    color: #374151;
+    cursor: pointer;
+    transition: border-color .15s ease, background-color .15s ease;
+}
+.wizard-toggle:hover { border-color: #93c5fd; }
+.wizard-toggle.is-checked { border-color: #2563eb; background: #eff6ff; }
+.wizard-toggle input[type="checkbox"] { width: 1.05rem; height: 1.05rem; accent-color: #2563eb; cursor: inherit; }
+.wizard-toggle.locked-option { opacity: .45; cursor: not-allowed; }
+.wizard-toggle.locked-option:hover { border-color: #e5e7eb; }
+
+/* Финальная сводка (Summary) */
+.wizard-summary {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: .5rem;
+    padding: .8rem 1rem;
+}
+.wizard-summary-table { width: 100%; font-size: .84rem; }
+.wizard-summary-table td { padding: .25rem .35rem; vertical-align: top; }
+.wizard-summary-table td.k { color: #6b7280; white-space: nowrap; width: 30%; }
+.wizard-summary-table td.v { color: #1f2937; font-weight: 500; }
