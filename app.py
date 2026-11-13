@@ -90,6 +90,7 @@ from models import (
     ChatMessage,
     CommunityGenerationContext,
     ContentPlanPeriod,
+    MarketingStrategy,
     Post,
     PostImage,
     Session as DbSession,
@@ -111,6 +112,7 @@ from services.content_manager_service import (
     check_and_regenerate_expiring_plan,
     detect_chat_buttons,
     add_chat_message,
+    _period_user_community,
 )
 from services.image_search_service import search_images_web
 from services.tariff_service import (
@@ -3503,6 +3505,303 @@ def get_tariff_info(  # FIX: Event loop unblocked — синхронный ро�
 
 
 # =============================================================================
+# Загрузка настроек мастера (Wizard) для фронтенда
+# =============================================================================
+
+class WizardSettingsRequest(BaseModel):
+    """Тело запроса GET /api/content-manager/wizard/settings."""
+    community_id: Optional[int] = None
+
+
+@app.get("/api/content-manager/wizard/settings")
+def get_wizard_settings(
+    request: Request,
+    db: Session = Depends(get_db),
+    community_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Возвращает все данные, нужные фронтенду для пошагового мастера.
+
+    Загружает:
+      - MarketingStrategy.rubrics, content_pillars, posting_schedule
+        (готовые рубрики и контент-столбы сообщества);
+      - CommunityGenerationContext (цель, ЦА, тон, preferences картинок);
+      - Тарифные лимиты (повторно, для полноты);
+      - user_communities для сводки.
+    """
+    user = require_auth(request, db)
+
+    # --- MarketingStrategy -----------------------------------------------
+    strategy_rubrics: List[str] = []
+    content_pillars: List[str] = []
+    posting_schedule: str = ""
+    if community_id is not None:
+        try:
+            strategy = (
+                db.query(MarketingStrategy)
+                .filter(MarketingStrategy.community_id == community_id)
+                .first()
+            )
+            if strategy is not None:
+                # rubrics — список {"name": ...}
+                for r in (strategy.rubrics or []):
+                    if isinstance(r, dict) and r.get("name"):
+                        strategy_rubrics.append(str(r["name"]))
+                    elif isinstance(r, str):
+                        strategy_rubrics.append(r)
+                content_pillars = [str(p) for p in (strategy.content_pillars or [])]
+                posting_schedule = (strategy.posting_schedule or "").strip()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("wizard/settings: не удалось прочитать MarketingStrategy: %s", e)
+
+    # --- CommunityGenerationContext --------------------------------------
+    gen_ctx_data: Dict[str, Any] = {}
+    uc: Optional[UserCommunity] = None
+    if community_id is not None:
+        uc = (
+            db.query(UserCommunity)
+            .filter(UserCommunity.id == community_id, UserCommunity.user_id == user.id)
+            .first()
+        )
+        if uc is not None:
+            ctx = (
+                db.query(CommunityGenerationContext)
+                .filter(CommunityGenerationContext.user_community_id == uc.id)
+                .first()
+            )
+            if ctx is not None:
+                gen_ctx_data = {
+                    "is_configured": ctx.is_configured,
+                    "goal": ctx.goal or "",
+                    "community_specifics": ctx.community_specifics or "",
+                    "target_audience": ctx.target_audience or "",
+                    "current_state_and_what_works": ctx.current_state_and_what_works or "",
+                    "image_source_preferences": ctx.image_source_preferences or "[]",
+                }
+
+    # --- Тарифные лимиты (переиспользуем существующую логику) -------------
+    plan = db.query(TariffPlan).filter(TariffPlan.id == user.tariff_plan_id).first() \
+        if user.tariff_plan_id else None
+    sources = _parse_allowed_sources(plan) if plan else []
+
+    return {
+        "strategy": {
+            "rubrics": strategy_rubrics,
+            "content_pillars": content_pillars,
+            "posting_schedule": posting_schedule,
+        },
+        "community_context": gen_ctx_data,
+        "limits": {
+            "allows_images": bool(plan.allows_images) if plan else False,
+            "max_images_per_post": int(plan.max_images_per_post or 0) if plan else 0,
+            "allowed_image_sources": sources,
+            "max_period_days": int(plan.max_plan_horizon_days) if plan else None,
+            "max_rubrics": int(plan.max_rubrics) if plan else None,
+            "max_posts_per_week": int(plan.max_posts_per_week) if plan else None,
+            "max_posts_per_month": int(plan.max_posts_per_month) if plan else None,
+            "period_options": _wizard_period_options(plan, db=db, user_id=user.id),
+            "image_source_options": _wizard_image_source_options(
+                bool(plan.allows_images) if plan else False, sources
+            ),
+        },
+        "tariff_name": plan.name if plan else None,
+        "user_communities": [
+            {"id": c.id, "group_name": c.group_name or "", "group_id": c.group_id}
+            for c in db.query(UserCommunity)
+            .filter(UserCommunity.user_id == user.id)
+            .all()
+        ],
+    }
+
+
+# =============================================================================
+# Генерация рубрик для мастера
+# =============================================================================
+
+class GenerateRubricsRequest(BaseModel):
+    """Тело запроса генерации рубрик."""
+    community_id: Optional[int] = None
+
+
+@app.post("/api/content-manager/wizard/generate-rubrics")
+async def wizard_generate_rubrics(
+    payload: GenerateRubricsRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Генерирует рубрики для контент-плана через ИИ на основе данных сообщества.
+
+    Использует:
+      - CommunityGenerationContext (цель, специфика, ЦА)
+      - MarketingStrategy (уже существующие рубрики, контент-столбы)
+      - CommunityContext (AI-паспорт: тон, УТП, инсайты)
+    """
+    user = require_auth(request, db)
+
+    # Загружаем данные сообщества для генерации
+    community_data = {}
+    strategy_rubrics = []
+    content_pillars = []
+    marketing_schedule = ""
+
+    if payload.community_id:
+        uc = (
+            db.query(UserCommunity)
+            .filter(UserCommunity.id == payload.community_id, UserCommunity.user_id == user.id)
+            .first()
+        )
+        if uc:
+            community_data["name"] = uc.group_name or f"Сообщество {uc.group_id}"
+            community_data["group_id"] = uc.group_id
+
+            # Загружаем CommunityGenerationContext
+            ctx = (
+                db.query(CommunityGenerationContext)
+                .filter(CommunityGenerationContext.user_community_id == uc.id)
+                .first()
+            )
+            if ctx and ctx.is_configured:
+                community_data["goal"] = ctx.goal or ""
+                community_data["specifics"] = ctx.community_specifics or ""
+                community_data["audience"] = ctx.target_audience or ""
+                community_data["works"] = ctx.current_state_and_what_works or ""
+
+            # Загружаем MarketingStrategy
+            strategy = (
+                db.query(MarketingStrategy)
+                .filter(MarketingStrategy.community_id == uc.group_id)
+                .first()
+            )
+            if strategy:
+                for r in (strategy.rubrics or []):
+                    if isinstance(r, dict) and r.get("name"):
+                        strategy_rubrics.append(str(r["name"]))
+                    elif isinstance(r, str):
+                        strategy_rubrics.append(r)
+                content_pillars = [str(p) for p in (strategy.content_pillars or [])]
+                marketing_schedule = (strategy.posting_schedule or "").strip()
+
+    # Формируем промпт для генерации рубрик
+    prompt_parts = [
+        "Сгенерируй 5-7 рубрик для контент-плана сообщества.",
+        "",
+        "Информация о сообществе:",
+    ]
+
+    if community_data.get("name"):
+        prompt_parts.append(f"- Название: {community_data['name']}")
+    if community_data.get("goal"):
+        prompt_parts.append(f"- Цель: {community_data['goal']}")
+    if community_data.get("specifics"):
+        prompt_parts.append(f"- Специфика: {community_data['specifics']}")
+    if community_data.get("audience"):
+        prompt_parts.append(f"- Целевая аудитория: {community_data['audience']}")
+    if community_data.get("works"):
+        prompt_parts.append(f"- Что работает: {community_data['works']}")
+
+    if strategy_rubrics:
+        prompt_parts.append(
+            f"\nУже существующие рубрики стратегии: {', '.join(strategy_rubrics)}"
+        )
+        prompt_parts.append(
+            "Не дублируй существующие рубрики — добавь новые, которые дополняют стратегию."
+        )
+
+    if content_pillars:
+        prompt_parts.append(
+            f"\nКонтент-столбы: {', '.join(content_pillars)}"
+        )
+
+    prompt_parts.append(
+        "\nВерни ответ в формате JSON массива строк (названия рубрик). "
+        "Пример: [\"Рубрика 1\", \"Рубрика 2\", \"Рубрика 3\"]"
+    )
+
+    prompt = "\n".join(prompt_parts)
+    system_prompt = (
+        "Ты эксперт по контент-маркетингу. Генерируй релевантные, разнообразные "
+        "и привлекательные рубрики для контент-плана. "
+        "Каждая рубрика должна быть короткой (до 3 слов) и отражать тематику контента. "
+        "Верни ТОЛЬКО JSON массив строк, без дополнительного текста."
+    )
+
+    # Генерируем через текстовый генератор (синхронно, в потоке)
+    try:
+        # Определяем используемый провайдер
+        use_local = True
+        try:
+            from services.content_manager_service import _default_use_local
+            use_local = _default_use_local(db)
+        except Exception:
+            use_local = True  # fallback на локальный
+
+        def _generate():
+            from generators.text_generator import generate_text
+            return generate_text(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                use_local=use_local,
+            )
+
+        raw_response = await asyncio.to_thread(_generate)
+
+        # Парсим JSON
+        clean_response = raw_response.strip()
+        # Убираем markdown JSON обёртку если есть
+        if clean_response.startswith("```json"):
+            clean_response = clean_response[7:]
+        if clean_response.endswith("```"):
+            clean_response = clean_response[:-3]
+        # Убираем все возможные оберточные символы
+        clean_response = clean_response.strip()
+
+        # Пробуем найти JSON объект в ответе
+        json_start = clean_response.find("[")
+        json_end = clean_response.rfind("]")
+        if json_start != -1 and json_end != -1:
+            clean_response = clean_response[json_start:json_end + 1]
+        elif json_start == -1:
+            logger.warning(f"Не найден JSON массив в ответе: {raw_response[:200]}")
+            clean_response = "[]"
+
+        generated_rubrics = json.loads(clean_response)
+
+        if not isinstance(generated_rubrics, list):
+            raise ValueError("Некорректный формат JSON: ожидаем массив")
+
+        # Фильтруем и нормализуем
+        final_rubrics = []
+        seen = set()
+        for r in generated_rubrics:
+            name = str(r).strip()
+            if name and len(name) <= 120:
+                key = name.lower()
+                if key not in seen:
+                    # Не дублируем существующие
+                    existing_lower = [s.lower() for s in strategy_rubrics]
+                    if key not in existing_lower:
+                        final_rubrics.append(name)
+                        seen.add(key)
+
+        # Если не смогли сгенерировать — возвращаем пустой список
+        if not final_rubrics:
+            logger.warning(f"Не удалось распарсить сгенерированные рубрики: {clean_response[:200]}")
+            final_rubrics = []
+
+        return {
+            "success": True,
+            "rubrics": final_rubrics,
+            "count": len(final_rubrics),
+        }
+
+    except Exception as e:
+        logger.error(f"Ошибка генерации рубрик: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка генерации рубрик: {str(e)}"
+        )
+
+
+# =============================================================================
 # Пошаговый мастер (Wizard) настройки генерации контент-плана
 # =============================================================================
 # Мастер состоит из 4 шагов: горизонт -> частота/объём -> рубрики -> медиа/стиль.
@@ -3538,15 +3837,9 @@ def _wizard_period_options(
     Если план None или период короче/равен max_plan_horizon_days — карточка
     доступна; иначе frontend показывает 🔒 и тултип «Доступно в тарифе …».
 
-    FIX (wizard): подзаголовок карточек («N дней · до M постов») больше НЕ
-    берётся из статичных дефолтов PERIOD_INFO — объём M считается по активному
-    тарифу пользователя:
-      - недельный объём ограничен max_posts_per_week;
-      - общий объём периода дополнительно режется месячным лимитом
-        max_posts_per_month;
-      - если у пользователя уже есть активный ContentPlanPeriod нужного типа,
-        показываем фактическое число постов этого плана (то, что реально
-        будет сгенерировано).
+    FIX (wizard): количество постов на каждой карточке рассчитывается из
+    тарифа пользователя (max_posts_per_week, max_posts_per_month), а не
+    берётся из статичного PERIOD_INFO.
     """
     options: List[Dict[str, Any]] = []
     labels = {"week": "📅 Неделя", "two_weeks": "📆 2 недели", "month": "🗓️ Месяц"}
@@ -3580,37 +3873,40 @@ def _wizard_period_options(
         except Exception as e:  # noqa: BLE001 — диагностика не должна ломать API
             logger.warning("wizard: не удалось прочитать активный период: %s", e)
 
-    def _capped_posts(value: str) -> int:
-        """Объём периода по активному тарифу (soft-лимиты планов PERIOD_INFO)."""
-        info = _TARIFF_PERIOD_INFO[value]
-        posts = int(info["posts"])
-        if plan is not None:
-            # Сколько постов реально поместится за дни периода при частоте
-            # тарифа (ceil на случай неполной недели в периоде «месяц»).
-            per_week = int(plan.max_posts_per_week or 0)
-            if per_week > 0:
-                weeks = math.ceil(info["days"] / 7)
-                posts = min(posts, per_week * weeks)
-            per_month = int(plan.max_posts_per_month or 0)
-            if per_month > 0:
-                posts = min(posts, per_month)
-        # Активный план пользователя точнее расчёта — показываем его цифру.
-        real = actual_posts.get(value)
-        if real:
-            posts = real
-        return posts
+    # Функция расчёта постов на основе тарифа
+    def _calc_posts_for_days(days: int) -> int:
+        """Рассчитывает максимальное число постов для заданного количества дней."""
+        if plan is None:
+            # Без тарифа — базовое значение из PERIOD_INFO (если есть) или days
+            return _TARIFF_PERIOD_INFO.get("week", {"posts": days})["posts"] if days <= 7 else days
+        
+        per_week = int(plan.max_posts_per_week or 0)
+        per_month = int(plan.max_posts_per_month or 0)
+        
+        # Сколько недель в периоде
+        weeks = math.ceil(days / 7)
+        posts = per_week * weeks if per_week > 0 else days
+        
+        # Режем месячным лимитом
+        if per_month > 0:
+            posts = min(posts, per_month)
+        
+        return max(1, posts)
 
+    # Стандартные периоды
     for value in ("week", "two_weeks", "month"):
         info = _TARIFF_PERIOD_INFO[value]
         available = True if horizon is None else info["days"] <= horizon
+        
+        # Берём реальное число постов активного периода пользователя
+        posts = actual_posts.get(value, _calc_posts_for_days(info["days"]))
+        
         options.append({
             "value": value,
             "label": labels[value],
             "days": info["days"],
-            "posts": _capped_posts(value),
+            "posts": posts,
             "available": available,
-            # Подсказка для заблокированной карточки: ищем следующий по
-            # длине горизонта тариф, в котором этот период уже доступен.
             "upgrade_hint": None if available else _wizard_upgrade_hint(info["days"]),
         })
     return options
@@ -3663,8 +3959,10 @@ def _wizard_image_source_options(allows_images: bool, allowed_sources: List[str]
 class WizardGenerateRequest(BaseModel):
     """Тело запроса мастера: настройки 4 шагов генерации контент-плана."""
 
-    period_type: str                      # Шаг 1: week | two_weeks | month
-    posts_per_week: Optional[int] = None  # Шаг 2: желаемая частота постов
+    period_type: Optional[str] = None     # Шаг 1: week | two_weeks | month (или null)
+    period_days: Optional[int] = None     # Шаг 1: произвольный горизонт в днях
+    posts_per_day: Optional[int] = None   # Шаг 2: постов в день
+    posts_per_week: Optional[int] = None  # Шаг 2: постов в неделю (расчётный, из posts_per_day * 7)
     rubrics: List[str] = []               # Шаг 3: названия рубрик (chips)
     image_sources: List[str] = []         # Шаг 4: ai | web_search | user_upload
     style_notes: Optional[str] = None     # Шаг 4: дополнительные пожелания к стилю
@@ -3685,12 +3983,52 @@ def _validate_wizard_settings(
     Returns:
         dict с фактами проверки (тарифная диагностика + нормализованные поля).
     """
-    period_type = (payload.period_type or "").strip().lower()
-    if period_type not in _TARIFF_PERIOD_INFO:
+    period_type = (payload.period_type or "").strip().lower() if payload.period_type else None
+    period_days = payload.period_days
+    posts_per_day = payload.posts_per_day or 0
+    
+    # Рассчитываем posts_per_week из posts_per_day
+    posts_per_week = posts_per_day * 7
+    # Если posts_per_week передван отдельно — используем его
+    if payload.posts_per_week and payload.posts_per_week > 0:
+        posts_per_week = payload.posts_per_week
+    
+    # Валидация: выбран период ИЛИ произвольный горизонт, но не оба и не ни одного
+    has_period_type = period_type and period_type in _TARIFF_PERIOD_INFO
+    has_period_days = period_days and period_days > 0
+    
+    if not has_period_type and not has_period_days:
         raise HTTPException(
             status_code=400,
-            detail="Недопустимый период. Доступно: week, two_weeks, month",
+            detail="Выберите горизонт планирования: период (неделя/2 недели/месяц) или укажите произвольное количество дней.",
         )
+    if has_period_type and has_period_days:
+        raise HTTPException(
+            status_code=400,
+            detail="Можно выбрать либо период, либо произвольный горизонт — не оба сразу.",
+        )
+    
+    # Если выбран произвольный период — валидируем по тарифу
+    custom_days = None
+    if has_period_days:
+        custom_days = period_days
+        plan = _get_user_tariff(db, user)
+        if plan is not None:
+            max_days = int(plan.max_plan_horizon_days or 0)
+            if custom_days > max_days:
+                raise HTTPException(
+                    status_code=403,
+                    detail=(
+                        f"Превышен лимит тарифного плана «{plan.name}»: "
+                        f"максимальная дальность контент-плана — {max_days} дн., "
+                        f"выбрано {custom_days} дн."
+                    ),
+                )
+    
+    # Если выбран период — валидируем стандартно
+    if has_period_type:
+        # Уже проверено выше что period_type в _TARIFF_PERIOD_INFO
+        pass
 
     # --- Шаг 3: рубрики (нормализация + лимит max_rubrics) ------------------
     rubrics: List[str] = []
@@ -3751,11 +4089,16 @@ def _validate_wizard_settings(
 
     # Горизонт периода и количество постов — через общий тарифный сервис
     # (check_tariff_generation_limits бросает 403 с готовым текстом ошибки).
-    tariff_check = check_tariff_generation_limits(db, user, period_type)
+    # Для custom периода используем period_type="week" (базовый) для проверки постов,
+    # но с учётом custom_days.
+    check_type = period_type if has_period_type else "week"
+    tariff_check = check_tariff_generation_limits(db, user, check_type, custom_days)
 
     return {
-        "period_type": period_type,
-        "posts_per_week": payload.posts_per_week,
+        "period_type": period_type or "week",  # fallback для совместимости
+        "period_days": custom_days,
+        "posts_per_day": posts_per_day,
+        "posts_per_week": posts_per_week,
         "rubrics": rubrics,
         "image_sources": image_sources,
         "style_notes": (payload.style_notes or "").strip() or None,
@@ -3820,13 +4163,18 @@ async def wizard_generate_content_plan(
         user_id=user.id,
         period_type=settings["period_type"],
         community_info=community_info,
+        custom_days=settings["period_days"],
     )
 
     # (4) Настройки мастера транслируем в чат как реплику пользователя —
     # generate_content_plan_from_chat строит промпт по истории чата.
+    period_label = WIZARD_PERIOD_LABELS.get(settings["period_type"])
+    if settings["period_days"] and settings["period_days"] > 0:
+        period_label = f"{settings['period_days']} дней (произвольный)"
+    
     lines = [
         "Настройки из мастера генерации контент-плана:",
-        f"— Горизонт: {WIZARD_PERIOD_LABELS.get(settings['period_type'], settings['period_type'])}",
+        f"— Горизонт: {period_label or settings['period_type']}",
     ]
     if settings["posts_per_week"]:
         lines.append(f"— Частота публикаций: {settings['posts_per_week']} постов(ов) в неделю")
@@ -3843,8 +4191,14 @@ async def wizard_generate_content_plan(
     wizard_message = "\n".join(lines)
     add_chat_message(db, period.id, "user", wizard_message)
 
-    # (5) Генерация: event loop не блокируем (requests.post внутри сервиса)
-    posts = await asyncio.to_thread(generate_content_plan_from_chat, db, period.id, user.id)
+    # (5) Генерация: event loop не блокируем (requests.post внутри сервиса).
+    # Передаём posts_per_week и period_days, чтобы генерация создала нужное число постов
+    # вместо хардкода из PERIOD_INFO.
+    posts = await asyncio.to_thread(
+        generate_content_plan_from_chat,
+        db, period.id, user.id,
+        posts_per_week=settings["posts_per_week"],
+    )
 
     return {
         "success": True,
@@ -3860,6 +4214,7 @@ async def wizard_generate_content_plan(
         "posts": posts,
         "settings": {
             "period_type": settings["period_type"],
+            "period_days": settings["period_days"],
             "posts_per_week": settings["posts_per_week"],
             "rubrics": settings["rubrics"],
             "image_sources": settings["image_sources"],

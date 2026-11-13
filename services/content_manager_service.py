@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
@@ -91,6 +92,48 @@ CONTEXT_SETUP_FORM_MESSAGE = (
     "«⚙️ Редактировать настройки» над чатом. Сохраните форму — и мы сразу "
     "перейдём к генерации плана."
 )
+
+
+# Пропорции типов постов: benefit : engagement : entertainment : sales
+# ≈ 3 : 2 : 1 : 1  (≈ 43 % / 29 % / 14 % / 14 %)
+_POST_TYPE_WEIGHTS = [
+    ("benefit", 3),
+    ("engagement", 2),
+    ("entertainment", 1),
+    ("sales", 1),
+]
+
+
+def _build_post_types(posts_per_week: int, total: int) -> List[str]:
+    """Возвращает список типов постов для ``total`` публикаций.
+
+    Распределение основано на пропорциях ``_POST_TYPE_WEIGHTS`` и
+    ``posts_per_week`` (используется для подсказки LLM).  При small
+    total (≤ 7) веса применяются через round-robin, при большом —
+    приближённо.
+    """
+    total_weight = sum(w for _, w in _POST_TYPE_WEIGHTS)
+    result: List[str] = []
+    # Сначала считаем сколько постов каждого типа нужно
+    per_type: Dict[str, int] = {}
+    remaining = total
+    for ptype, weight in _POST_TYPE_WEIGHTS:
+        count = round(total * weight / total_weight)
+        count = max(1, count)  # хотя бы 1 пост каждого типа
+        per_type[ptype] = count
+        remaining -= count
+    # Распределяем остаток по весам
+    for ptype, weight in _POST_TYPE_WEIGHTS:
+        bonus = round(remaining * weight / total_weight)
+        per_type[ptype] += bonus
+    # Собираем итоговый список
+    for ptype, count in per_type.items():
+        result.extend([ptype] * count)
+    # Обрезаем / дополняем до total
+    result = result[:total]
+    while len(result) < total:
+        result.append("benefit")
+    return result[:total]
 
 
 def build_smart_start_message(ctx: CommunityGenerationContext) -> str:
@@ -451,17 +494,19 @@ def get_or_create_content_plan_period(
     db: Session,
     user_id: int,
     period_type: str = "week",
-    community_info: Optional[str] = None
+    community_info: Optional[str] = None,
+    custom_days: Optional[int] = None
 ) -> ContentPlanPeriod:
     """
     Создаёт новый период контент-плана или возвращает активный.
-    
+
     Args:
         db: Сессия базы данных
         user_id: ID пользователя
         period_type: Тип периода (week, two_weeks, month)
         community_info: Информация о сообществе
-        
+        custom_days: Произвольный горизонт в днях (если > 0, переопределяет period_type)
+
     Returns:
         ContentPlanPeriod: Период контент-плана
     """
@@ -470,7 +515,7 @@ def get_or_create_content_plan_period(
         ContentPlanPeriod.user_id == user_id,
         ContentPlanPeriod.status == "active"
     ).first()
-    
+
     if active_period:
         # Проверяем не закончился ли период
         now = datetime.now()
@@ -483,10 +528,13 @@ def get_or_create_content_plan_period(
         else:
             logger.info(f"Возвращаем активный период {active_period.id}")
             return active_period
-    
-    # Создаём новый период
-    now = datetime.now()
-    if period_type == "week":
+
+    # Определяем количество дней
+    if custom_days and custom_days > 0:
+        days = custom_days
+        # Сохраняем как "custom_NN" для идентификации
+        period_type = f"custom_{custom_days}"
+    elif period_type == "week":
         days = 7
     elif period_type == "two_weeks":
         days = 14
@@ -494,7 +542,8 @@ def get_or_create_content_plan_period(
         days = 30
     else:
         days = 7
-    
+
+    now = datetime.now()
     new_period = ContentPlanPeriod(
         user_id=user_id,
         period_type=period_type,
@@ -503,7 +552,7 @@ def get_or_create_content_plan_period(
         status="draft",
         community_info=community_info or ""
     )
-    
+
     db.add(new_period)
     db.commit()
     db.refresh(new_period)
@@ -1055,16 +1104,19 @@ def initialize_chat_with_questions(
 def generate_content_plan_from_chat(
     db: Session,
     period_id: int,
-    user_id: int
+    user_id: int,
+    posts_per_week: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """
     Генерирует контент-план на основе истории чата.
-    
+
     Args:
         db: Сессия базы данных
         period_id: ID периода контент-плана
         user_id: ID пользователя
-        
+        posts_per_week: желаемое количество постов в неделю (из мастера).
+            Если None — используется хардкод по period.period_type.
+
     Returns:
         List[Dict]: Список созданных постов
     """
@@ -1096,9 +1148,26 @@ def generate_content_plan_from_chat(
     # Получаем историю чата для контекста
     chat_history = get_chat_history(db, period_id)
     chat_context = "\n".join([f"{msg.role}: {msg.content}" for msg in chat_history])
-    
-    # Определяем количество постов基于 периода
-    if period.period_type == "week":
+
+    # Определяем количество постов.
+    # Если пользователь указал posts_per_week через мастер — используем его.
+    # Иначе — хардкод по period.period_type (обратная совместимость).
+    if posts_per_week is not None and posts_per_week > 0:
+        # Сколько недель в периоде (извлекаем actual days из custom_NN или периода)
+        days = (period.end_date - period.start_date).days + 1
+        weeks = max(1, math.ceil(days / 7))
+        num_posts = posts_per_week * weeks
+        post_types = _build_post_types(posts_per_week, num_posts)
+    elif period.period_type.startswith("custom_"):
+        # Произвольный период: извлекаем days из period_type
+        try:
+            custom_days = int(period.period_type.split("_")[1])
+        except (IndexError, ValueError):
+            custom_days = 7
+        weeks = max(1, math.ceil(custom_days / 7))
+        num_posts = posts_per_week * weeks if posts_per_week else custom_days
+        post_types = _build_post_types(posts_per_week, num_posts) if posts_per_week else ["benefit"] * num_posts
+    elif period.period_type == "week":
         num_posts = 7
         post_types = ["benefit"] * 3 + ["engagement"] * 2 + ["entertainment"] * 1 + ["sales"] * 1
     elif period.period_type == "two_weeks":
